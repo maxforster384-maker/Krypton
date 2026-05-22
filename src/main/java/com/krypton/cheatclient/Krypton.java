@@ -110,8 +110,6 @@ public class Krypton implements ModInitializer {
     public static double prevFreecamX, prevFreecamY, prevFreecamZ;
     public static float freecamYaw, freecamPitch;
     public static float prevFreecamYaw, prevFreecamPitch;
-    // Eingefrorene Spielerposition (verhindert Fallen durch Gravitation)
-    public static double savedPlayerX, savedPlayerY, savedPlayerZ;
     private static int rightClickCooldown = 0;
     private static double lastMouseX = 0;
     private static double lastMouseY = 0;
@@ -346,10 +344,6 @@ public class Krypton implements ModInitializer {
             freecamZ = client.player.getZ();
             freecamYaw = client.player.getYaw();
             freecamPitch = client.player.getPitch();
-            // Position einfrieren, damit der Spieler nicht fällt
-            savedPlayerX = client.player.getX();
-            savedPlayerY = client.player.getY();
-            savedPlayerZ = client.player.getZ();
 
             prevFreecamX = freecamX;
             prevFreecamY = freecamY;
@@ -517,10 +511,6 @@ public class Krypton implements ModInitializer {
                     toggleFreecam(client);
                     return;
                 }
-
-                // Position und Geschwindigkeit einfrieren → kein Fallen, konsistenter Raycast
-                client.player.setPosition(savedPlayerX, savedPlayerY, savedPlayerZ);
-                client.player.setVelocity(0, 0, 0);
 
                 prevFreecamX = freecamX;
                 prevFreecamY = freecamY;
@@ -1590,7 +1580,7 @@ public class Krypton implements ModInitializer {
                     if (holeSizeInput.length() < 3) holeSizeInput += (char)('0' + k - GLFW.GLFW_KEY_KP_0);
                 } else if (k == GLFW.GLFW_KEY_BACKSPACE) {
                     if (!holeSizeInput.isEmpty()) holeSizeInput = holeSizeInput.substring(0, holeSizeInput.length()-1);
-                } else if (k == GLFW.GLFW_KEY_ENTER || k == GLFW.GLFW_KEY_KP_ENTER || k == GLFW.GLFW_KEY_ESCAPE) {
+                } else if (k == GLFW.GLFW_KEY_ENTER || k == GLFW.GLFW_KEY_KP_ENTER) {
                     if (!holeSizeInput.isEmpty()) {
                         try {
                             int v = Integer.parseInt(holeSizeInput);
@@ -1598,6 +1588,16 @@ public class Krypton implements ModInitializer {
                         } catch (NumberFormatException ignored) {}
                     }
                     isEnteringHoleSize = false;
+                } else if (k == GLFW.GLFW_KEY_ESCAPE) {
+                    // Wert übernehmen UND GUI direkt schließen
+                    if (!holeSizeInput.isEmpty()) {
+                        try {
+                            int v = Integer.parseInt(holeSizeInput);
+                            if (v >= 1 && v <= 100) minHoleSize = v;
+                        } catch (NumberFormatException ignored) {}
+                    }
+                    isEnteringHoleSize = false;
+                    client.setScreen(null);
                 }
                 return true;
             }

@@ -14,7 +14,11 @@
       "Bash(Sort-Object)",
       "Bash(grep -E \"\\\\.\\(gradle|xml|json|properties|md|yml|yaml\\)$\")",
       "Bash(gradlew.bat build *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)"
     ]
   }
 }
