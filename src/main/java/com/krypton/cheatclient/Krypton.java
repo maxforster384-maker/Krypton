@@ -53,6 +53,8 @@ public class Krypton implements ModInitializer {
 
     // --- KEYBINDS ---
     private static KeyBinding openGuiKey;
+    private static KeyBinding freecamKeyBinding;
+    private static KeyBinding bonesFarmerKeyBinding;
     public static int freecamKey = GLFW.GLFW_KEY_V;
     public static int lastSavedGuiKey = -1;
     private static boolean wasFreecamKeyPressed = false;
@@ -62,6 +64,7 @@ public class Krypton implements ModInitializer {
     public static boolean isPlayerEspActive = false;
     public static boolean isAutoSpawnerActive = false;
     public static boolean isSpawnerEspActive = false;
+    public static boolean isTracersActive = false;
     public static boolean isFreecamActive = false;
     public static boolean isFullbrightActive = false;
     public static boolean disableFreecamOnDamage = true;
@@ -105,6 +108,7 @@ public class Krypton implements ModInitializer {
     // --- BONES FARMER ---
     public static boolean isBonesFarmerActive = false;
     public static int bonesFarmerHotkey = GLFW.GLFW_KEY_UNKNOWN;
+    public static int bonesFarmerDropBase = 28;
     private static boolean wasBonesFarmerKeyPressed = false;
     private static int bonesFarmerState = 0;
     private static int bonesFarmerDelay = 0;
@@ -152,6 +156,8 @@ public class Krypton implements ModInitializer {
     public static float savedYaw, savedPitch;
     public static float displayYaw, displayPitch;
     private static float driftYaw = 0f, driftPitch = 0f;
+    private static boolean freecamSwitchedPerspective = false;
+    private static int ticksConnected = 0;
     private static int rightClickCooldown = 0;
     private static double lastMouseX = 0;
     private static double lastMouseY = 0;
@@ -275,6 +281,29 @@ public class Krypton implements ModInitializer {
         try {
             BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_bfkey.txt"));
             writer.write(String.valueOf(bonesFarmerHotkey));
+            writer.close();
+        } catch (Exception e) {}
+    }
+
+    public static void loadDropBase() {
+        try {
+            File file = new File("krypton_bfdrop.txt");
+            if (file.exists()) {
+                BufferedReader reader = new BufferedReader(new FileReader(file));
+                String line = reader.readLine();
+                if (line != null && !line.trim().isEmpty()) {
+                    int v = Integer.parseInt(line.trim());
+                    if (v >= 1 && v <= 99) bonesFarmerDropBase = v;
+                }
+                reader.close();
+            }
+        } catch (Exception e) {}
+    }
+
+    public static void saveDropBase() {
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_bfdrop.txt"));
+            writer.write(String.valueOf(bonesFarmerDropBase));
             writer.close();
         } catch (Exception e) {}
     }
@@ -403,6 +432,7 @@ public class Krypton implements ModInitializer {
                 line = reader.readLine(); if (line != null) isPlayerEspActive     = Boolean.parseBoolean(line.trim());
                 line = reader.readLine(); if (line != null) isAutoSpawnerActive   = Boolean.parseBoolean(line.trim());
                 line = reader.readLine(); if (line != null) isSpawnerEspActive    = Boolean.parseBoolean(line.trim());
+                line = reader.readLine(); if (line != null) isTracersActive       = Boolean.parseBoolean(line.trim());
                 reader.close();
             }
         } catch (Exception e) {}
@@ -414,7 +444,8 @@ public class Krypton implements ModInitializer {
             writer.write(String.valueOf(isBedrockFinderActive)); writer.newLine();
             writer.write(String.valueOf(isPlayerEspActive));     writer.newLine();
             writer.write(String.valueOf(isAutoSpawnerActive));   writer.newLine();
-            writer.write(String.valueOf(isSpawnerEspActive));
+            writer.write(String.valueOf(isSpawnerEspActive));    writer.newLine();
+            writer.write(String.valueOf(isTracersActive));
             writer.close();
         } catch (Exception e) {}
     }
@@ -464,6 +495,72 @@ public class Krypton implements ModInitializer {
     }
 
     // ==========================================
+    // KEYBINDING HELPERS
+    // ==========================================
+
+    // Liest den aktuell gebundenen Key-Code aus einem KeyBinding (non-final Feld = boundKey).
+    // Funktioniert mapping-unabhängig weil defaultKey immer final ist.
+    static int getBoundKeyCode(KeyBinding binding) {
+        try {
+            for (java.lang.reflect.Field f : KeyBinding.class.getDeclaredFields()) {
+                if (f.getType() == InputUtil.Key.class
+                        && !java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
+                    f.setAccessible(true);
+                    InputUtil.Key key = (InputUtil.Key) f.get(binding);
+                    return key != null ? key.getCode() : GLFW.GLFW_KEY_UNKNOWN;
+                }
+            }
+        } catch (Exception ignored) {}
+        return GLFW.GLFW_KEY_UNKNOWN;
+    }
+
+    // Setzt den bound Key eines registrierten KeyBinding und aktualisiert die interne Map.
+    static void setKeyBindingBoundKey(KeyBinding binding, int keyCode) {
+        try {
+            for (java.lang.reflect.Field f : KeyBinding.class.getDeclaredFields()) {
+                if (f.getType() == InputUtil.Key.class
+                        && !java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
+                    f.setAccessible(true);
+                    f.set(binding, InputUtil.Type.KEYSYM.createFromCode(keyCode));
+                    break;
+                }
+            }
+            KeyBinding.updateKeysByCode();
+        } catch (Exception ignored) {}
+    }
+
+    // Setzt die Minecraft-Perspective via Reflection (umgeht private-Zugriff auf GameOptions.perspective).
+    private static void setGamePerspective(MinecraftClient client,
+                                            net.minecraft.client.option.Perspective p) {
+        try {
+            java.lang.reflect.Field pf = client.options.getClass().getDeclaredField("perspective");
+            pf.setAccessible(true);
+            Object opt = pf.get(client.options);
+            for (java.lang.reflect.Method m : opt.getClass().getMethods()) {
+                if ("setValue".equals(m.getName()) && m.getParameterCount() == 1) {
+                    m.invoke(opt, p); break;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // Zeichnet einen Tracer als gerade Linie von der Kamera zum Spieler.
+    private static void drawTracerLine(MatrixStack st, VertexConsumer buf,
+                                        double ex, double ey, double ez, int color) {
+        double dist = Math.sqrt(ex*ex + ey*ey + ez*ez);
+        if (!Double.isFinite(dist) || dist < 0.1) return;
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = color & 0xFF;
+        int a = (color >> 24) & 0xFF;
+        float nx = (float)(ex / dist), ny = (float)(ey / dist), nz = (float)(ez / dist);
+        var mat   = st.peek().getPositionMatrix();
+        var entry = st.peek();
+        buf.vertex(mat, 0f, 0f, 0f).color(r, g, b, a).normal(entry, nx, ny, nz);
+        buf.vertex(mat, (float)ex, (float)ey, (float)ez).color(r, g, b, a).normal(entry, nx, ny, nz);
+    }
+
+    // ==========================================
     // FREECAM LOGIK
     // ==========================================
 
@@ -509,12 +606,25 @@ public class Krypton implements ModInitializer {
         loadLogs();
         loadCheatStates();
         loadBonesFarmerKey();
+        loadDropBase();
         loadDiscordConfig();
 
         openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.krypton.gui",
                 InputUtil.Type.KEYSYM,
                 lastSavedGuiKey != -1 ? lastSavedGuiKey : GLFW.GLFW_KEY_RIGHT_SHIFT,
+                KeyBinding.Category.MISC
+        ));
+        freecamKeyBinding = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.krypton.freecam",
+                InputUtil.Type.KEYSYM,
+                freecamKey,
+                KeyBinding.Category.MISC
+        ));
+        bonesFarmerKeyBinding = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.krypton.bonesfarmer",
+                InputUtil.Type.KEYSYM,
+                bonesFarmerHotkey,
                 KeyBinding.Category.MISC
         ));
 
@@ -565,30 +675,49 @@ public class Krypton implements ModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
 
             // --- GUI KEY AUTO BACKUP SYSTEM ---
+            // Nutzt !isFinal um sicher boundKey (nicht defaultKey) zu treffen
             try {
                 for (java.lang.reflect.Field f : KeyBinding.class.getDeclaredFields()) {
-                    if (f.getType() == InputUtil.Key.class) {
+                    if (f.getType() == InputUtil.Key.class
+                            && !java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
                         f.setAccessible(true);
                         InputUtil.Key key = (InputUtil.Key) f.get(openGuiKey);
-                        if (key != null && key != openGuiKey.getDefaultKey()) {
-                            if (key.getCode() != lastSavedGuiKey && key.getCode() != -1) {
-                                lastSavedGuiKey = key.getCode();
-                                saveGuiKey(lastSavedGuiKey);
-                            }
-                            break;
+                        if (key != null && key.getCode() != -1 && key.getCode() != lastSavedGuiKey) {
+                            lastSavedGuiKey = key.getCode();
+                            saveGuiKey(lastSavedGuiKey);
                         }
+                        break;
                     }
                 }
             } catch (Exception e) {}
+            // Sync: freecamKey und bonesFarmerHotkey aus den registrierten KeyBindings lesen
+            // (falls User in vanilla Controls geändert hat)
+            int fcCode = getBoundKeyCode(freecamKeyBinding);
+            if (fcCode != GLFW.GLFW_KEY_UNKNOWN && fcCode != freecamKey) {
+                freecamKey = fcCode;
+                saveKeybind();
+            }
+            int bfCode = getBoundKeyCode(bonesFarmerKeyBinding);
+            if (bfCode != bonesFarmerHotkey) {
+                bonesFarmerHotkey = bfCode;
+                saveBonesFarmerKey();
+            }
 
             // --- SERVER TRACKING FÜR RECONNECT ---
             if (client.getCurrentServerEntry() != null) {
                 lastServer = client.getCurrentServerEntry();
             }
             if (client.world != null) {
-                wasSafetyLogout = false;
+                ticksConnected++;
+                // wasSafetyLogout erst nach 60 Ticks echter Verbindung clearen –
+                // verhindert Reset während des kurzen Disconnect-Übergangs (1-2 Ticks)
+                if (ticksConnected > 60) {
+                    wasSafetyLogout = false;
+                }
                 attemptIndex = 0;
                 reconnectTicks = -1;
+            } else {
+                ticksConnected = 0;
             }
 
             // --- AUTO RECONNECT TICK LOGIK ---
@@ -671,23 +800,15 @@ public class Krypton implements ModInitializer {
                 if (client.currentScreen == null) client.setScreen(new ClickGuiScreen());
             }
 
-            if (client.getWindow() != null) {
-                boolean isFKeyDown = InputUtil.isKeyPressed(client.getWindow(), freecamKey);
-                if (isFKeyDown && !wasFreecamKeyPressed && client.currentScreen == null) {
-                    isFreecamActive = !isFreecamActive;
-                    toggleFreecam(client);
-                }
-                wasFreecamKeyPressed = isFKeyDown;
+            if (freecamKeyBinding.wasPressed() && client.currentScreen == null) {
+                isFreecamActive = !isFreecamActive;
+                toggleFreecam(client);
+            }
 
-                if (bonesFarmerHotkey != GLFW.GLFW_KEY_UNKNOWN) {
-                    boolean bfDown = InputUtil.isKeyPressed(client.getWindow(), bonesFarmerHotkey);
-                    if (bfDown && !wasBonesFarmerKeyPressed && client.currentScreen == null) {
-                        isBonesFarmerActive = !isBonesFarmerActive;
-                        bonesFarmerLoggedSlots = false;
-                        if (!isBonesFarmerActive) { bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false; }
-                    }
-                    wasBonesFarmerKeyPressed = bfDown;
-                }
+            if (bonesFarmerKeyBinding.wasPressed() && client.currentScreen == null) {
+                isBonesFarmerActive = !isBonesFarmerActive;
+                bonesFarmerLoggedSlots = false;
+                if (!isBonesFarmerActive) { bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false; }
             }
 
             if (isFreecamActive && client.player != null) {
@@ -697,6 +818,11 @@ public class Krypton implements ModInitializer {
                     toggleFreecam(client);
                     return;
                 }
+
+                // Horizontale Velocity nullen – verhindert Sliding durch restliches Momentum
+                // Y-Achse bleibt erhalten (Schwerkraft, Knockback-Vertikal für Anti-Cheat)
+                Vec3d vel = client.player.getVelocity();
+                client.player.setVelocity(0.0, vel.y, 0.0);
 
                 // Spieler-Kopf/Body einfrieren – minimales Noise damit Rotation nicht
                 // 100% konstant ist (verhindert AC-Erkennung durch Rotationskonstanz)
@@ -1029,6 +1155,7 @@ public class Krypton implements ModInitializer {
                         actionDelayTimer = 0;
                         isAutoSpawnerActive = false;
                         wasSafetyLogout = true;
+                        ticksConnected = 0;
                         safetyLogoutTimer = -1;
                         lastTargetSpawner = null;
                         hasMinedSpawner = false;
@@ -1135,8 +1262,15 @@ public class Krypton implements ModInitializer {
 
             if (isPlayerEspActive) {
                 VertexConsumer lines = imm.getBuffer(RenderLayers.lines());
-                for (PlayerEntity p : mc.world.getPlayers()) {
-                    if (p == mc.player) continue;
+                // Snapshot verhindert ConcurrentModificationException beim Spieler-join/-leave
+                List<PlayerEntity> playerSnapshot = new java.util.ArrayList<>(mc.world.getPlayers());
+                for (PlayerEntity p : playerSnapshot) {
+                    if (p == mc.player || p.isRemoved()) continue;
+
+                    net.minecraft.util.math.Box bbox = p.getBoundingBox();
+                    if (bbox == null) continue;
+                    float h = (float)(bbox.maxY - bbox.minY);
+                    if (h <= 0f || Float.isNaN(h)) continue;
 
                     String lowerName = p.getName().getString().toLowerCase();
                     boolean isWhitelisted = whitelistedPlayers.contains(lowerName);
@@ -1146,7 +1280,6 @@ public class Krypton implements ModInitializer {
                     double py = p.getY() - cam.y;
                     double pz = p.getZ() - cam.z;
 
-                    float h       = (float)(p.getBoundingBox().maxY - p.getBoundingBox().minY);
                     float legTop  = h * (0.75f / 1.8f);
                     float torsoTop= h * (1.5f  / 1.8f);
                     float torsoCY = (legTop + torsoTop) / 2f;
@@ -1154,36 +1287,83 @@ public class Krypton implements ModInitializer {
                     float legCY   = legTop / 2f;
                     float legHH   = legTop / 2f;
 
+                    float bodyYaw = p.getBodyYaw();
+                    if (Float.isNaN(bodyYaw) || Float.isInfinite(bodyYaw)) bodyYaw = 0f;
+
                     st.push();
                     st.translate(px, py, pz);
-                    st.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-p.getBodyYaw()));
+                    st.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-bodyYaw));
 
-                    // Kopf
+                    // Kopf – dreht sich mit headYaw unabhängig vom Body
+                    float headYaw = p.getHeadYaw();
+                    if (Float.isNaN(headYaw) || Float.isInfinite(headYaw)) headYaw = bodyYaw;
+                    st.push();
+                    st.translate(0, torsoTop + 0.25, 0);
+                    st.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(-(headYaw - bodyYaw)));
                     VertexRendering.drawOutline(st, lines,
                         VoxelShapes.cuboid(-0.25, -0.25, -0.25, 0.25, 0.25, 0.25),
-                        0, torsoTop + 0.25, 0, color, 1.0f);
+                        0, 0, 0, color, 4.5f);
+                    st.pop();
+
                     // Torso
                     VertexRendering.drawOutline(st, lines,
                         VoxelShapes.cuboid(-0.25, -torsoHH, -0.125, 0.25, torsoHH, 0.125),
-                        0, torsoCY, 0, color, 1.0f);
-                    // Linker Arm
+                        0, torsoCY, 0, color, 4.5f);
+
+                    // Arm-Schwinganimation via LimbAnimator (Schulter als Pivot)
+                    float limbPos = p.limbAnimator.getAnimationProgress();
+                    float limbSpd = Math.min(p.limbAnimator.getSpeed(), 1.0f);
+                    float armSwing = (float)Math.toDegrees(Math.cos(limbPos * 0.6662f) * limbSpd);
+
+                    // Linker Arm – hängt am Schulter-Pivot, schwingt entgegenphasig
+                    st.push();
+                    st.translate(-0.375, torsoTop, 0);
+                    st.multiply(RotationAxis.POSITIVE_X.rotationDegrees(armSwing));
                     VertexRendering.drawOutline(st, lines,
-                        VoxelShapes.cuboid(-0.125, -torsoHH, -0.125, 0.125, torsoHH, 0.125),
-                        -0.375, torsoCY, 0, color, 1.0f);
-                    // Rechter Arm
+                        VoxelShapes.cuboid(-0.125, -(torsoHH * 2), -0.125, 0.125, 0, 0.125),
+                        0, 0, 0, color, 4.5f);
+                    st.pop();
+
+                    // Rechter Arm – hängt am Schulter-Pivot
+                    st.push();
+                    st.translate(0.375, torsoTop, 0);
+                    st.multiply(RotationAxis.POSITIVE_X.rotationDegrees(-armSwing));
                     VertexRendering.drawOutline(st, lines,
-                        VoxelShapes.cuboid(-0.125, -torsoHH, -0.125, 0.125, torsoHH, 0.125),
-                        0.375, torsoCY, 0, color, 1.0f);
+                        VoxelShapes.cuboid(-0.125, -(torsoHH * 2), -0.125, 0.125, 0, 0.125),
+                        0, 0, 0, color, 4.5f);
+                    st.pop();
+
                     // Linkes Bein
                     VertexRendering.drawOutline(st, lines,
                         VoxelShapes.cuboid(-0.125, -legHH, -0.125, 0.125, legHH, 0.125),
-                        -0.125, legCY, 0, color, 1.0f);
+                        -0.125, legCY, 0, color, 4.5f);
                     // Rechtes Bein
                     VertexRendering.drawOutline(st, lines,
                         VoxelShapes.cuboid(-0.125, -legHH, -0.125, 0.125, legHH, 0.125),
-                        0.125, legCY, 0, color, 1.0f);
+                        0.125, legCY, 0, color, 4.5f);
 
                     st.pop();
+                }
+                imm.draw();
+            }
+
+            if (isTracersActive) {
+                VertexConsumer tracerBuf = imm.getBuffer(RenderLayers.lines());
+                List<PlayerEntity> tracerSnap = new java.util.ArrayList<>(mc.world.getPlayers());
+                for (PlayerEntity p : tracerSnap) {
+                    if (p == mc.player || p.isRemoved()) continue;
+                    net.minecraft.util.math.Box bbox = p.getBoundingBox();
+                    if (bbox == null) continue;
+                    float h = (float)(bbox.maxY - bbox.minY);
+                    if (h <= 0f || Float.isNaN(h)) continue;
+                    double ex = p.getX() - cam.x;
+                    double ey = p.getY() - cam.y + h * 0.5;
+                    double ez = p.getZ() - cam.z;
+                    if (!Double.isFinite(ex) || !Double.isFinite(ey) || !Double.isFinite(ez)) continue;
+                    String lowerName = p.getName().getString().toLowerCase();
+                    boolean isWhitelisted = whitelistedPlayers.contains(lowerName);
+                    int color = isWhitelisted ? 0xFF00FF80 : 0xFF0080FF;
+                    drawTracerLine(st, tracerBuf, ex, ey, ez, color);
                 }
                 imm.draw();
             }
@@ -1202,6 +1382,7 @@ public class Krypton implements ModInitializer {
 
             GL11.glEnable(GL11.GL_DEPTH_TEST);
         });
+
     }
 
     // ==========================================
@@ -1236,7 +1417,7 @@ public class Krypton implements ModInitializer {
                     if (dist <= 25) { bonesFarmerTargetSpawner = pos; break; }
                 }
                 if (bonesFarmerTargetSpawner == null) { bonesFarmerDelay = 20; break; }
-                dropLootClicksTarget = 23 + (int)(Math.random() * 8); // 23-30
+                dropLootClicksTarget = Math.max(1, bonesFarmerDropBase - 2 + (int)(Math.random() * 5)); // base ± 2
                 dropLootClicksDone = 0;
                 bonesFarmerState = 2;
                 bonesFarmerDelay = 2 + (int)(Math.random() * 3);
@@ -1981,14 +2162,20 @@ public class Krypton implements ModInitializer {
                 combined.append(entry.getDisplayName().getString()).append(" ");
         }
 
-        // 2. Entity Display-Name (Name über dem Kopf)
-        combined.append(p.getDisplayName().getString()).append(" ");
+        // 2. Entity Display-Name (Name über dem Kopf) – kann null sein bei frisch joinenden Spielern
+        try {
+            net.minecraft.text.Text dn = p.getDisplayName();
+            if (dn != null) combined.append(dn.getString()).append(" ");
+        } catch (Exception ignored) {}
 
         // 3. Scoreboard Team
         net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
         if (team != null) {
             combined.append(team.getName()).append(" ");
-            combined.append(team.getDisplayName().getString()).append(" ");
+            try {
+                net.minecraft.text.Text tdn = team.getDisplayName();
+                if (tdn != null) combined.append(tdn.getString()).append(" ");
+            } catch (Exception ignored) {}
         }
 
         String display = combined.toString().toLowerCase();
@@ -2225,6 +2412,77 @@ public class Krypton implements ModInitializer {
     }
 
     // ==========================================
+    // WHITELIST VERWALTUNG
+    // ==========================================
+    public static class WhitelistScreen extends Screen {
+        private final Screen parent;
+        private TextFieldWidget inputField;
+        private boolean wasMouseDown = false;
+
+        public WhitelistScreen(Screen parent) {
+            super(Text.literal("Whitelist"));
+            this.parent = parent;
+        }
+
+        @Override
+        protected void init() {
+            int cx = width / 2;
+            inputField = new TextFieldWidget(textRenderer, cx - 75, height - 52, 130, 16, Text.literal(""));
+            inputField.setMaxLength(32);
+            addDrawableChild(inputField);
+            addDrawableChild(ButtonWidget.builder(Text.literal("+"), b -> {
+                String name = inputField.getText().trim().toLowerCase();
+                if (!name.isEmpty() && !whitelistedPlayers.contains(name)) {
+                    whitelistedPlayers.add(name);
+                    saveWhitelist();
+                }
+                inputField.setText("");
+            }).dimensions(cx + 60, height - 52, 20, 16).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Zurück"), b ->
+                client.setScreen(parent)).dimensions(cx - 40, height - 30, 80, 16).build());
+        }
+
+        @Override
+        public void render(DrawContext ctx, int mx, int my, float delta) {
+            ctx.fill(0, 0, width, height, 0xCC000000);
+            int bx = width/2 - 95, listTop = 26, listBot = height - 62;
+            ctx.fill(bx, listTop - 2, bx + 190, listBot, 0xFF0B0F17);
+            ctx.drawCenteredTextWithShadow(textRenderer,
+                Text.literal("§eWhitelist §8– §7anklicken entfernt"), width/2, 10, -1);
+            ctx.drawText(textRenderer, Text.literal("§7Name hinzufügen:"), bx, height - 65, 0xFF6E7687, false);
+
+            // Klick-Erkennung via GLFW (kein @Override mouseClicked nötig)
+            long win = client.getWindow().getHandle();
+            boolean down = GLFW.glfwGetMouseButton(win, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+
+            int y = listTop;
+            for (int i = 0; i < whitelistedPlayers.size() && y + 12 <= listBot; i++) {
+                String name = whitelistedPlayers.get(i);
+                boolean hover = mx >= bx && mx < bx + 190 && my >= y && my < y + 12;
+                if (hover) ctx.fill(bx, y, bx + 190, y + 12, 0x33FF4444);
+                if (hover && down && !wasMouseDown) {
+                    whitelistedPlayers.remove(i);
+                    saveWhitelist();
+                    wasMouseDown = true;
+                    super.render(ctx, mx, my, delta);
+                    return;
+                }
+                ctx.drawText(textRenderer, Text.literal(name), bx + 4, y + 2,
+                    hover ? 0xFFFF6666 : 0xFFCCCEd4, false);
+                y += 12;
+            }
+            if (whitelistedPlayers.isEmpty())
+                ctx.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal("§7(leer)"), width/2, listTop + 8, -1);
+
+            wasMouseDown = down;
+            super.render(ctx, mx, my, delta);
+        }
+
+        @Override public boolean shouldPause() { return false; }
+    }
+
+    // ==========================================
     // LOCHGRÖSSE EINGABE-FENSTER
     // ==========================================
     public static class HoleSizeScreen extends Screen {
@@ -2277,10 +2535,12 @@ public class Krypton implements ModInitializer {
         private float   openAnim              = 0f;
         private boolean isRebindingFreecam    = false;
         private boolean isRebindingBonesFarmer = false;
-        private boolean isEnteringHoleSize = false;
-        private String  holeSizeInput      = "";
-        private boolean wasMouseDown       = false;
-        private final float[] dotAnim     = new float[15]; // per-module 0→1
+        private boolean isEnteringHoleSize  = false;
+        private String  holeSizeInput       = "";
+        private boolean isEnteringDropCount = false;
+        private String  dropCountInput      = "";
+        private boolean wasMouseDown        = false;
+        private final float[] dotAnim      = new float[17]; // per-module 0→1
 
         // ── Layout ──────────────────────────────────────────────────────────
         // Column width: max 185 px, shrinks if screen is too narrow to fit all cols
@@ -2309,18 +2569,20 @@ public class Krypton implements ModInitializer {
         // idx 0=Freecam  1=AutoSpawner  2=AutoReconnect  3=DisableOnDmg
         //     4=BedrockFinder  5=PlayerESP  6=SpawnerESP  7=Fullbright
         //     8=PlayerLogs(screen)  9=LogoutLogs(screen)  10=FreecamKey(rebind)
-        //     11=ReconnectCfg(screen)  12=HoleSize(cycle +1)  13=Logo(texture header)
+        //     11=ReconnectCfg(screen)  12=HoleSize(input)  13=BonesFarm(toggle)
+        //     14=BonesKey(rebind)  15=BonesDropBase(input)  16=Tracers(toggle)
+        //     17=Whitelist(screen)
         private static final String[] CATS  = { "MISC",  "BASEFINDING", "RENDER",  "CLIENT" };
         private static final int[]    IC_COL = { 0xFF8B8FA8, 0xFF44BBFF, 0xFFAA55FF, 0xFF44CCFF };
         private static final int[][]  MODS   = {
-            //  MISC: Freecam, FreecamKey, DisableOnDmg, AutoSpawner, AutoReconnect, ReconnectSet
-            { 0, 10, 3, 1, 2, 11 },
-            //  BASEFINDING: SpawnerESP, BonesFarm, BonesKey
-            { 6, 13, 14 },
-            //  RENDER: PlayerESP, Fullbright, BedrockFinder, MinHoleSize
-            { 5, 7, 4, 12 },
-            //  CLIENT: PlayerLogs, LogoutLogs
-            { 8, 9 }
+            //  MISC: Freecam, FreecamKey, DisableOnDmg
+            { 0, 10, 3 },
+            //  BASEFINDING: BedrockFinder, MinHoleSize
+            { 4, 12 },
+            //  RENDER: PlayerESP, Tracers, SpawnerESP, Fullbright
+            { 5, 16, 6, 7 },
+            //  CLIENT: AutoSpawner, AutoReconnect, ReconnectSet, Whitelist, PlayerLogs, LogoutLogs, BonesFarm, BonesKey, BonesDropBase
+            { 1, 2, 11, 17, 8, 9, 13, 14, 15 }
         };
         private static final String[] MNAME  = {
             /* 0 */ "FREECAM",
@@ -2337,7 +2599,10 @@ public class Krypton implements ModInitializer {
             /* 11*/ "RECONNECT SET",
             /* 12*/ "MIN HOLE SIZE",
             /* 13*/ "BONES FARM",
-            /* 14*/ "BONES KEY"
+            /* 14*/ "BONES KEY",
+            /* 15*/ "BONES DROP",
+            /* 16*/ "TRACERS",
+            /* 17*/ "WHITELIST"
         };
 
         protected ClickGuiScreen() { super(Text.literal("Krypton")); }
@@ -2354,6 +2619,7 @@ public class Krypton implements ModInitializer {
                 case 6 -> isSpawnerEspActive;
                 case 7  -> isFullbrightActive;
                 case 13 -> isBonesFarmerActive;
+                case 16 -> isTracersActive;
                 default -> false;
             };
         }
@@ -2368,11 +2634,14 @@ public class Krypton implements ModInitializer {
                 case 5  ->   isPlayerEspActive      = !isPlayerEspActive;
                 case 6  ->   isSpawnerEspActive     = !isSpawnerEspActive;
                 case 7  -> { isFullbrightActive     = !isFullbrightActive;   saveFullbright(); }
+                case 16 ->   isTracersActive        = !isTracersActive;
+                case 17 ->   client.setScreen(new WhitelistScreen(this));
                 case 8  ->   client.setScreen(new PlayerLogScreen(this));
                 case 9  ->   client.setScreen(new LogoutLogScreen(this));
                 case 10 ->   isRebindingFreecam = true;
                 case 11 ->   client.setScreen(new ReconnectSettingsScreen(this));
                 case 12 -> { isEnteringHoleSize = true; holeSizeInput = ""; }
+                case 15 -> { isEnteringDropCount = true; dropCountInput = ""; }
                 case 13 -> {
                     isBonesFarmerActive = !isBonesFarmerActive;
                     if (!isBonesFarmerActive) {
@@ -2386,6 +2655,18 @@ public class Krypton implements ModInitializer {
 
         private void modRightClick(int i) {
             // no right-click actions currently
+        }
+
+        private void commitDropCount() {
+            if (!dropCountInput.isEmpty()) {
+                try {
+                    int v = Integer.parseInt(dropCountInput);
+                    if (v >= 1 && v <= 99) {
+                        bonesFarmerDropBase = v;
+                        saveDropBase();
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
         }
 
         // ── Layout helpers ───────────────────────────────────────────────────
@@ -2468,6 +2749,7 @@ public class Krypton implements ModInitializer {
                 dotAnim[i] += (t - dotAnim[i]) * 0.22f;
             }
             dotAnim[13] += ((isBonesFarmerActive ? 1f : 0f) - dotAnim[13]) * 0.22f;
+            dotAnim[16] += ((isTracersActive      ? 1f : 0f) - dotAnim[16]) * 0.22f;
 
             // Mouse edge-detection via LWJGL (API-version agnostic)
             long win = client.getWindow().getHandle();
@@ -2512,14 +2794,15 @@ public class Krypton implements ModInitializer {
                     boolean on    = modOn(mi);
                     boolean hover = mx >= x && mx < x+cw && my >= ry && my < ry+ROW_H;
 
-                    if (on && (mi < 8 || mi == 13)) ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_ACT);
-                    if (hover)        ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_HOV);
+                    boolean isToggle = (mi < 8 || mi == 13 || mi == 16);
+                    if (on && isToggle) ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_ACT);
+                    if (hover)         ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_HOV);
 
                     // Modulname kürzen wenn nötig (gilt für alle Zeilen)
-                    int tc = (on && (mi < 8 || mi == 13)) ? C_MOD_ON : C_MOD_OFF;
+                    int tc = (on && isToggle) ? C_MOD_ON : C_MOD_OFF;
                     String drawName = MNAME[mi];
                     // Toggle: 16px + 4px Rand; Pfeil/Label-Zeilen: 6px + 8px Rand
-                    int maxW = (mi < 8 || mi == 13) ? (cw - PADX - 22) : (cw - PADX - 16);
+                    int maxW = isToggle ? (cw - PADX - 22) : (cw - PADX - 16);
                     if (textRenderer.getWidth(drawName) > maxW) {
                         while (drawName.length() > 1 && textRenderer.getWidth(drawName + "..") > maxW)
                             drawName = drawName.substring(0, drawName.length() - 1);
@@ -2528,7 +2811,7 @@ public class Krypton implements ModInitializer {
                     ctx.drawText(textRenderer, drawName, x+PADX, ry+(ROW_H-8)/2, tc, false);
 
                     // Right-side indicator
-                    if (mi < 8 || mi == 13) {
+                    if (isToggle) {
                         float a  = dotAnim[mi];
                         int   tx = x + cw - 20;          // 16px Toggle + 4px Rand
                         int   ty = ry + (ROW_H - 8) / 2; // vertikal zentriert
@@ -2556,6 +2839,11 @@ public class Krypton implements ModInitializer {
                         ctx.drawText(textRenderer, hs,
                             x+cw-textRenderer.getWidth(hs)-5, ry+(ROW_H-8)/2,
                             isEnteringHoleSize ? 0xFF44BBFF : C_DASH, false);
+                    } else if (mi == 15) {
+                        String dl = isEnteringDropCount ? (dropCountInput + "|") : ("[" + bonesFarmerDropBase + "]");
+                        ctx.drawText(textRenderer, dl,
+                            x+cw-textRenderer.getWidth(dl)-5, ry+(ROW_H-8)/2,
+                            isEnteringDropCount ? 0xFF44BBFF : C_DASH, false);
                     } else {
                         ctx.drawText(textRenderer, ">", x+cw-11, ry+(ROW_H-8)/2, C_DASH, false);
                     }
@@ -2588,14 +2876,34 @@ public class Krypton implements ModInitializer {
         public boolean keyPressed(KeyInput input) {
             if (isRebindingFreecam) {
                 freecamKey = input.key();
+                setKeyBindingBoundKey(freecamKeyBinding, freecamKey);
                 saveKeybind();
                 isRebindingFreecam = false;
                 return true;
             }
             if (isRebindingBonesFarmer) {
                 bonesFarmerHotkey = input.key();
+                setKeyBindingBoundKey(bonesFarmerKeyBinding, bonesFarmerHotkey);
                 saveBonesFarmerKey();
                 isRebindingBonesFarmer = false;
+                return true;
+            }
+            if (isEnteringDropCount) {
+                int k = input.key();
+                if (k >= GLFW.GLFW_KEY_0 && k <= GLFW.GLFW_KEY_9) {
+                    if (dropCountInput.length() < 2) dropCountInput += (char)('0' + k - GLFW.GLFW_KEY_0);
+                } else if (k >= GLFW.GLFW_KEY_KP_0 && k <= GLFW.GLFW_KEY_KP_9) {
+                    if (dropCountInput.length() < 2) dropCountInput += (char)('0' + k - GLFW.GLFW_KEY_KP_0);
+                } else if (k == GLFW.GLFW_KEY_BACKSPACE) {
+                    if (!dropCountInput.isEmpty()) dropCountInput = dropCountInput.substring(0, dropCountInput.length()-1);
+                } else if (k == GLFW.GLFW_KEY_ENTER || k == GLFW.GLFW_KEY_KP_ENTER) {
+                    commitDropCount();
+                    isEnteringDropCount = false;
+                } else if (k == GLFW.GLFW_KEY_ESCAPE) {
+                    commitDropCount();
+                    isEnteringDropCount = false;
+                    client.setScreen(null);
+                }
                 return true;
             }
             if (isEnteringHoleSize) {

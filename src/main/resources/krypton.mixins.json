@@ -11,7 +11,8 @@
 		"KeyboardInputMixin",
 		"WorldRendererMixin",
 		"SimpleOptionMixin",
-		"MinecraftClientMixin"
+		"MinecraftClientMixin",
+		"PerspectiveMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
