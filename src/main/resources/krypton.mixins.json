@@ -10,7 +10,8 @@
 		"EntityMixin",
 		"KeyboardInputMixin",
 		"WorldRendererMixin",
-		"SimpleOptionMixin"
+		"SimpleOptionMixin",
+		"MinecraftClientMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
