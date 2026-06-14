@@ -559,8 +559,10 @@ public class Krypton implements ModInitializer {
         float nx = (float)(dx / dist), ny = (float)(dy / dist), nz = (float)(dz / dist);
         var mat   = st.peek().getPositionMatrix();
         var entry = st.peek();
-        buf.vertex(mat, (float)sx, (float)sy, (float)sz).color(r, g, b, a).normal(entry, nx, ny, nz);
-        buf.vertex(mat, (float)ex, (float)ey, (float)ez).color(r, g, b, a).normal(entry, nx, ny, nz);
+        // WICHTIG: Das Linien-Format in 1.21.11 braucht pro Vertex AUCH lineWidth,
+        // sonst -> "Missing elements in vertex: LineWidth" Crash.
+        buf.vertex(mat, (float)sx, (float)sy, (float)sz).color(r, g, b, a).normal(entry, nx, ny, nz).lineWidth(2.0f);
+        buf.vertex(mat, (float)ex, (float)ey, (float)ez).color(r, g, b, a).normal(entry, nx, ny, nz).lineWidth(2.0f);
     }
 
     // ==========================================
