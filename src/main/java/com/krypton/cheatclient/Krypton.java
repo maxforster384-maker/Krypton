@@ -544,19 +544,22 @@ public class Krypton implements ModInitializer {
         } catch (Exception ignored) {}
     }
 
-    // Zeichnet einen Tracer als gerade Linie von der Kamera zum Spieler.
+    // Zeichnet einen Tracer als gerade Linie von einem Startpunkt (sx,sy,sz)
+    // zum Spieler (ex,ey,ez). Beide Punkte sind kamera-relativ.
     private static void drawTracerLine(MatrixStack st, VertexConsumer buf,
+                                        double sx, double sy, double sz,
                                         double ex, double ey, double ez, int color) {
-        double dist = Math.sqrt(ex*ex + ey*ey + ez*ez);
+        double dx = ex - sx, dy = ey - sy, dz = ez - sz;
+        double dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
         if (!Double.isFinite(dist) || dist < 0.1) return;
         int r = (color >> 16) & 0xFF;
         int g = (color >> 8) & 0xFF;
         int b = color & 0xFF;
         int a = (color >> 24) & 0xFF;
-        float nx = (float)(ex / dist), ny = (float)(ey / dist), nz = (float)(ez / dist);
+        float nx = (float)(dx / dist), ny = (float)(dy / dist), nz = (float)(dz / dist);
         var mat   = st.peek().getPositionMatrix();
         var entry = st.peek();
-        buf.vertex(mat, 0f, 0f, 0f).color(r, g, b, a).normal(entry, nx, ny, nz);
+        buf.vertex(mat, (float)sx, (float)sy, (float)sz).color(r, g, b, a).normal(entry, nx, ny, nz);
         buf.vertex(mat, (float)ex, (float)ey, (float)ez).color(r, g, b, a).normal(entry, nx, ny, nz);
     }
 
@@ -824,10 +827,11 @@ public class Krypton implements ModInitializer {
                 Vec3d vel = client.player.getVelocity();
                 client.player.setVelocity(0.0, vel.y, 0.0);
 
-                // Spieler-Kopf/Body einfrieren – minimales Noise damit Rotation nicht
-                // 100% konstant ist (verhindert AC-Erkennung durch Rotationskonstanz)
-                displayYaw   = savedYaw   + (float)(Math.random() - 0.5) * 0.018f;
-                displayPitch = MathHelper.clamp(savedPitch + (float)(Math.random() - 0.5) * 0.012f, -90f, 90f);
+                // Spieler-Kopf/Body EXAKT einfrieren – kein Rauschen mehr.
+                // Der Spieler steht perfekt still, kein sichtbares Zittern für
+                // andere Spieler oder Anticheat.
+                displayYaw   = savedYaw;
+                displayPitch = savedPitch;
                 client.player.setYaw(displayYaw);
                 client.player.setPitch(displayPitch);
                 client.player.setHeadYaw(displayYaw);
@@ -1213,6 +1217,7 @@ public class Krypton implements ModInitializer {
             List<String> activeCheats = new ArrayList<>();
             if (isBedrockFinderActive) activeCheats.add("Finder: §4" + stableHoles.size());
             if (isPlayerEspActive) activeCheats.add("Player ESP: §bON");
+            if (isTracersActive) activeCheats.add("Tracers: §bON");
             if (isFreecamActive) activeCheats.add("Freecam: §aON");
             if (isFullbrightActive) activeCheats.add("Fullbright: §eON");
             if (isAutoSpawnerActive) activeCheats.add("Guard: §eON");
@@ -1265,7 +1270,17 @@ public class Krypton implements ModInitializer {
                 // Snapshot verhindert ConcurrentModificationException beim Spieler-join/-leave
                 List<PlayerEntity> playerSnapshot = new java.util.ArrayList<>(mc.world.getPlayers());
                 for (PlayerEntity p : playerSnapshot) {
-                    if (p == mc.player || p.isRemoved()) continue;
+                    if (p.isRemoved()) continue;
+                    // Eigener Spieler bekommt AUCH eine Box (z.B. um sich in der
+                    // Freecam von weitem wiederzufinden) – aber nur wenn die Kamera
+                    // weit genug weg ist. In 1st-Person würde die Box sonst direkt
+                    // an der Kamera kleben und den ganzen Bildschirm ausfüllen.
+                    if (p == mc.player) {
+                        double dcx = p.getX() - cam.x;
+                        double dcy = p.getEyeY() - cam.y;
+                        double dcz = p.getZ() - cam.z;
+                        if (dcx*dcx + dcy*dcy + dcz*dcz < 1.0) continue;
+                    }
 
                     net.minecraft.util.math.Box bbox = p.getBoundingBox();
                     if (bbox == null) continue;
@@ -1349,6 +1364,12 @@ public class Krypton implements ModInitializer {
 
             if (isTracersActive) {
                 VertexConsumer tracerBuf = imm.getBuffer(RenderLayers.lines());
+                // Startpunkt aller Tracer: 1 Block vor der Kamera in Blickrichtung.
+                // NICHT direkt an der Kamera (0,0,0) starten – das würde durch die
+                // Near-Clip-Plane abgeschnitten und die Linie wäre unsichtbar.
+                var tracerCam = context.gameRenderer().getCamera();
+                Vec3d tracerLook = Vec3d.fromPolar(tracerCam.getPitch(), tracerCam.getYaw());
+                double sx = tracerLook.x, sy = tracerLook.y, sz = tracerLook.z;
                 List<PlayerEntity> tracerSnap = new java.util.ArrayList<>(mc.world.getPlayers());
                 for (PlayerEntity p : tracerSnap) {
                     if (p == mc.player || p.isRemoved()) continue;
@@ -1363,7 +1384,7 @@ public class Krypton implements ModInitializer {
                     String lowerName = p.getName().getString().toLowerCase();
                     boolean isWhitelisted = whitelistedPlayers.contains(lowerName);
                     int color = isWhitelisted ? 0xFF00FF80 : 0xFF0080FF;
-                    drawTracerLine(st, tracerBuf, ex, ey, ez, color);
+                    drawTracerLine(st, tracerBuf, sx, sy, sz, ex, ey, ez, color);
                 }
                 imm.draw();
             }
