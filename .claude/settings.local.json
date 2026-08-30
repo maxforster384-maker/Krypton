@@ -26,7 +26,8 @@
       "PowerShell(Get-Command *)",
       "PowerShell(Join-Path *)",
       "PowerShell($javap = \"C:\\\\Program Files\\\\Java\\\\jdk-23\\\\bin\\\\javap.exe\"; $jar = \"C:\\\\Users\\\\olyop\\\\.gradle\\\\caches\\\\fabric-loom\\\\minecraftMaven\\\\net\\\\minecraft\\\\minecraft-merged\\\\1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2\\\\minecraft-merged-1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2.jar\"; & $javap -classpath $jar \"net.minecraft.entity.LimbAnimator\" 2>&1)",
-      "PowerShell($javap = \"C:\\\\Program Files\\\\Java\\\\jdk-23\\\\bin\\\\javap.exe\"; $jar = \"C:\\\\Users\\\\olyop\\\\.gradle\\\\caches\\\\fabric-loom\\\\minecraftMaven\\\\net\\\\minecraft\\\\minecraft-merged\\\\1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2\\\\minecraft-merged-1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2.jar\"; & $javap -classpath $jar \"net.minecraft.client.render.VertexConsumer\" 2>&1 | Select-String \"normal\")"
+      "PowerShell($javap = \"C:\\\\Program Files\\\\Java\\\\jdk-23\\\\bin\\\\javap.exe\"; $jar = \"C:\\\\Users\\\\olyop\\\\.gradle\\\\caches\\\\fabric-loom\\\\minecraftMaven\\\\net\\\\minecraft\\\\minecraft-merged\\\\1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2\\\\minecraft-merged-1.21.11-net.fabricmc.yarn.1_21_11.1.21.11+build.4-v2.jar\"; & $javap -classpath $jar \"net.minecraft.client.render.VertexConsumer\" 2>&1 | Select-String \"normal\")",
+      "Bash(git pull *)"
     ]
   }
 }

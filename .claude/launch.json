@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gastro-dev",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'); Set-Location 'C:\\Users\\olyop\\Downloads\\gastroenterologie-gropiusstadt'; npm run dev"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "lusion-clone-preview",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-File",
+        "C:\\Users\\olyop\\AppData\\Local\\Temp\\claude\\C--Users-olyop-Downloads-krypton-template-1-21-1-neu-2-0\\67706828-f93f-4fd1-bc98-b6dfcf2e818d\\scratchpad\\static-server.ps1",
+        "-Root",
+        "C:\\Users\\olyop\\Downloads\\lusion-clone",
+        "-Port",
+        "8091"
+      ],
+      "port": 8091
+    }
+  ]
+}
