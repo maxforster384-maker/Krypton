@@ -14,7 +14,16 @@ public class KeyboardInputMixin {
 	private void onTick(CallbackInfo ci) {
 		if (Krypton.isFreecamActive) {
 			net.minecraft.client.input.Input input = (net.minecraft.client.input.Input) (Object) this;
-			input.playerInput = new net.minecraft.util.PlayerInput(false, false, false, false, false, false, false);
+			// Alle Bewegungseingaben nullen – der Spielerkörper bleibt stehen,
+			// während die Kamera fliegt.
+			// AUSNAHME Sneak: läuft der Dauer-Sneak des Spawner-Schutzes, bleibt
+			// der Körper auch in der Freecam geduckt. Sneak allein bewegt den
+			// Spieler nicht, die Freecam bleibt also eingefroren – der Schutz
+			// geht aber nicht verloren, nur weil man kurz in die Freecam geht.
+			// Komponenten-Reihenfolge von PlayerInput:
+			// forward, backward, left, right, jump, sneak, sprint
+			boolean sneak = Krypton.shouldForceSneak();
+			input.playerInput = new net.minecraft.util.PlayerInput(false, false, false, false, false, sneak, false);
 		}
 	}
 }

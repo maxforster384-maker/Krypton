@@ -83,10 +83,77 @@ public class Krypton implements ModInitializer {
     public static boolean isAutoReconnectActive = false;
     public static boolean isInfiniteReconnect = false;
     public static List<Integer> reconnectDelays = new ArrayList<>(Arrays.asList(3, 10, 30, 60));
+    // wasSafetyLogout wird PERSISTIERT (krypton_safelogout.txt). Solange das Flag
+    // steht, darf NIEMALS automatisch rejoined werden – weder ueber Auto Reconnect
+    // noch ueber den Session-Fix. Sonst koennte der Client nach dem Notfall-Logout
+    // direkt wieder auf den Server, waehrend der Gegner noch bei den Spawnern steht.
     public static boolean wasSafetyLogout = false;
     public static int reconnectTicks = -1;
     public static int attemptIndex = 0;
     public static net.minecraft.client.network.ServerInfo lastServer = null;
+
+    // --- SESSION FIX ---
+    // Faengt kaputte Verbindungsabbrueche ab und verbindet kontrolliert neu.
+    //
+    // WICHTIG: "Invalid Session" ist nur EINE von vielen Formulierungen. Auf
+    // Servern mit vielen Plugins (DonutSMP & Co.) kommt genauso oft ein roher
+    // Java-/Netty-Stacktrace mit langen Zahlen zurueck, z.B.
+    //   "Internal Exception: io.netty.handler.codec.DecoderException:
+    //    java.lang.IndexOutOfBoundsException: Index 1146 out of bounds for length 0"
+    // Deshalb wird der Grund KATEGORISIERT statt gegen eine einzige Liste
+    // geprueft, und wie breit reagiert wird, steuert sessionFixMode.
+    //
+    // Ein echtes Re-Auth ist aus einem Mod heraus nicht moeglich (dafuer
+    // braucht es den Microsoft-Refresh-Token des Launchers), deswegen wird
+    // nach einer begrenzten Versuchszahl abgebrochen und der User informiert.
+    public static boolean isSessionFixActive = false;
+    // 0 = STRIKT (nur echte Session-Fehler)
+    // 1 = TECHNIK (zusaetzlich Exceptions/Timeouts/Netzwerkfehler)  <- Default
+    // 2 = ALLES (jeder Grund ausser den harten Ausschluessen)
+    public static int sessionFixMode = 1;
+    private static int sessionFixAttempts = 0;
+    // Einmal-Flag, damit der Disconnect-Screen-Handler pro Trennung nur einmal
+    // laeuft (er wuerde sonst jeden Tick erneut loggen und hochzaehlen).
+    private static boolean disconnectHandled = false;
+
+    // Kategorie 1 – eindeutige Session-/Auth-Probleme.
+    private static final String[] SESSION_KICK_PATTERNS = {
+        "invalid session", "invalid_session", "ungueltige sitzung", "ungültige sitzung",
+        "failed to verify username", "unverified_username", "benutzername konnte nicht",
+        "authentication servers", "authentifizierungsserver", "auth servers",
+        "not authenticated", "nicht authentifiziert", "bad login",
+        "session expired", "sitzung abgelaufen", "session is invalid",
+        "already logged in", "bereits eingeloggt", "already online"
+    };
+    // Kategorie 2 – technische Abbrueche: Exceptions, Netty, Timeouts, Pakete.
+    // Genau hier landen die "Java + lange Zahl"-Kicks.
+    private static final String[] TECHNICAL_KICK_PATTERNS = {
+        "internal exception", "internal error", "interner fehler", "error id", "fehler-id",
+        "io.netty", "java.lang", "java.io", "java.net", "java.util", "exception",
+        "timed out", "timeout", "zeitüberschreitung", "zeituberschreitung",
+        "connection reset", "connection closed", "connection lost", "forcibly closed",
+        "end of stream", "broken pipe", "readerindex", "out of bounds",
+        "keepalive", "keep alive", "keep-alive",
+        "protocol error", "bad packet", "invalid packet", "packet too", "decoder",
+        "nullpointer", "socket", "stacktrace", "at net.minecraft", "at com."
+    };
+    // Kategorie 3 – hier NIE automatisch neu verbinden. Das sind bewusste
+    // Entscheidungen des Servers, kein Bug.
+    private static final String[] NEVER_RECONNECT_PATTERNS = {
+        "banned", "gebannt", "permanently banned", "temporarily banned",
+        "tempban", "permaban", "you are ban",
+        "kicked by", "gekickt von", "kicked from the game by",
+        "whitelist", "not whitelisted",
+        "outdated client", "outdated server", "unsupported version", "veraltete version",
+        "server is full", "der server ist voll", "server voll",
+        "no permission", "keine berechtigung"
+    };
+
+    // --- DISCONNECT LOG ---
+    // Die letzten 20 Trenngruende im Klartext. Auf Servern mit sehr
+    // unterschiedlichen Fehlermeldungen ist das der einzige Weg, die
+    // Session-Fix-Einstellung sinnvoll zu waehlen.
+    public static final CopyOnWriteArrayList<String> disconnectHistory = new CopyOnWriteArrayList<>();
 
     // --- BEDROCK FINDER ---
     public static int minHoleSize = 2;
@@ -104,6 +171,28 @@ public class Krypton implements ModInitializer {
 
     // --- WHITELIST ---
     public static List<String> whitelistedPlayers = new ArrayList<>();
+
+    // --- STAFF-ERKENNUNG (STERN-RANKS) ---
+    // Der Server markiert Staff nicht mehr per Klartext ("Admin"), sondern mit
+    // einem FARBIGEN STERN im Tab-/Team-Prefix:
+    //   grün -> Mod / Admin     blau -> Helper / Owner     lila -> Developer
+    // Entscheidend fuer den Guard ist nur "Staff ja/nein" – die Farbe bestimmt
+    // lediglich das angezeigte Label. Welche Farbfamilien zaehlen, ist
+    // konfigurierbar (krypton_staffdetect.txt + Staff-Scan-Screen), damit man
+    // ohne Neubau nachjustieren kann, falls der Server z.B. auch Spendern
+    // Sterne gibt.
+    public static boolean staffStarGreen  = true;   // Mod / Admin
+    public static boolean staffStarBlue   = true;   // Helper / Owner
+    public static boolean staffStarPurple = true;   // Developer
+    public static boolean staffStarOther  = false;  // andere Sternfarben (Deko/Spender)
+    public static boolean staffTextRanks  = true;   // alte Klartext-Erkennung zusaetzlich
+    // Stern-Glyphen als Unicode-Escapes, damit die Erkennung nicht von der
+    // Quelldatei-Kodierung abhaengt. ASCII '*' ist bewusst NICHT dabei –
+    // das kommt in Deko-Prefixes viel zu haeufig vor (False Positives).
+    private static final String STAR_GLYPHS =
+        "\u2605\u2606\u269D\u2726\u2727\u2729\u272A\u272B\u272C\u272D\u272E\u272F\u2730"
+      + "\u2731\u2732\u2733\u2734\u2735\u2736\u2737\u2738\u2739\u273A\u273B\u273C\u273D"
+      + "\u2742\u2743\u2749\u274A\u274B\u2B50";
 
     // --- BONES FARMER ---
     public static boolean isBonesFarmerActive = false;
@@ -133,6 +222,23 @@ public class Krypton implements ModInitializer {
     private static double targetOffsetX = 0.5;
     private static double targetOffsetY = 0.5;
     private static double targetOffsetZ = 0.5;
+
+    // --- SPAWNER-SCHUTZ HAERTUNG (Menue-Sperre, Auto-Sneak, Abbau-Garantie) ---
+    // guardEngaged = Guard hat einen fremden Spieler erkannt und arbeitet gerade.
+    // In dem Zustand hat der Notfall-Abbau absolute Prioritaet: Server-GUIs werden
+    // geschlossen, der Bones Farmer pausiert, und das Mining laeuft ueber unseren
+    // eigenen Raycast (unabhaengig von Screen, Cursor-Lock und Fensterfokus).
+    public static volatile boolean guardEngaged = false;
+    // >0 = Auto-Sneak kurz aussetzen. Noetig weil ein sneakender Spieler
+    // serverseitig KEINE Block-GUI oeffnen kann (ServerPlayerInteractionManager
+    // prueft shouldCancelInteraction()). Der Bones Farmer und die Freecam
+    // melden ihre Rechtsklicks hier an.
+    public static int sneakSuppressTicks = 0;
+    private static boolean forcedSneakLastTick = false;
+    // Ticks in denen der Ziel-Spawner nicht per Raycast getroffen wurde
+    // (ausser Reichweite / verdeckt). Verhindert ein Haengenbleiben in State 5.
+    private static int guardAimFailTicks = 0;
+    private static int guardSneakWaitTicks = 0;
 
     // --- DISCORD SPAWNER SCRIPT ---
     private static String discordToken = "MTEwNz0NjQ4MjYxNDEzNjg4NA.GdOveX.igPaPkFKF-umA5pb43o87fqscTv0MiGLOMLky6";
@@ -433,6 +539,14 @@ public class Krypton implements ModInitializer {
                 line = reader.readLine(); if (line != null) isAutoSpawnerActive   = Boolean.parseBoolean(line.trim());
                 line = reader.readLine(); if (line != null) isSpawnerEspActive    = Boolean.parseBoolean(line.trim());
                 line = reader.readLine(); if (line != null) isTracersActive       = Boolean.parseBoolean(line.trim());
+                line = reader.readLine(); if (line != null) isSessionFixActive    = Boolean.parseBoolean(line.trim());
+                line = reader.readLine();
+                if (line != null && !line.trim().isEmpty()) {
+                    try {
+                        int m = Integer.parseInt(line.trim());
+                        if (m >= 0 && m <= 2) sessionFixMode = m;
+                    } catch (NumberFormatException ignored) {}
+                }
                 reader.close();
             }
         } catch (Exception e) {}
@@ -445,7 +559,92 @@ public class Krypton implements ModInitializer {
             writer.write(String.valueOf(isPlayerEspActive));     writer.newLine();
             writer.write(String.valueOf(isAutoSpawnerActive));   writer.newLine();
             writer.write(String.valueOf(isSpawnerEspActive));    writer.newLine();
-            writer.write(String.valueOf(isTracersActive));
+            writer.write(String.valueOf(isTracersActive));      writer.newLine();
+            writer.write(String.valueOf(isSessionFixActive)); writer.newLine();
+            writer.write(String.valueOf(sessionFixMode));
+            writer.close();
+        } catch (Exception e) {}
+    }
+
+    // Notfall-Logout-Sperre persistieren. Ueberlebt damit auch einen Client-Neustart:
+    // solange die Datei "true" enthaelt, wird NIE automatisch rejoined.
+    public static void loadDisconnectLog() {
+        disconnectHistory.clear();
+        try {
+            File file = new File("krypton_disconnects.txt");
+            if (!file.exists()) return;
+            BufferedReader reader = new BufferedReader(new FileReader(file));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) disconnectHistory.add(line);
+            }
+            reader.close();
+        } catch (Exception e) {}
+    }
+
+    public static void saveDisconnectLog() {
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_disconnects.txt"));
+            for (String s : disconnectHistory) { writer.write(s); writer.newLine(); }
+            writer.close();
+        } catch (Exception e) {}
+    }
+
+    public static void loadSafetyLogout() {
+        try {
+            File file = new File("krypton_safelogout.txt");
+            if (file.exists()) {
+                BufferedReader reader = new BufferedReader(new FileReader(file));
+                String line = reader.readLine();
+                if (line != null && !line.trim().isEmpty()) wasSafetyLogout = Boolean.parseBoolean(line.trim());
+                reader.close();
+            }
+        } catch (Exception e) {}
+    }
+
+    // Einziger Schreibpfad fuer wasSafetyLogout – so kann das Flag nirgends
+    // versehentlich nur im RAM geaendert werden.
+    public static void setSafetyLogout(boolean value) {
+        wasSafetyLogout = value;
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_safelogout.txt"));
+            writer.write(String.valueOf(value));
+            writer.close();
+        } catch (Exception e) {}
+    }
+
+    public static void loadStaffDetect() {
+        try {
+            File file = new File("krypton_staffdetect.txt");
+            if (!file.exists()) return;
+            BufferedReader reader = new BufferedReader(new FileReader(file));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                String k = line.substring(0, eq).trim().toLowerCase();
+                boolean v = Boolean.parseBoolean(line.substring(eq + 1).trim());
+                switch (k) {
+                    case "green"  -> staffStarGreen  = v;
+                    case "blue"   -> staffStarBlue   = v;
+                    case "purple" -> staffStarPurple = v;
+                    case "other"  -> staffStarOther  = v;
+                    case "text"   -> staffTextRanks  = v;
+                    default -> {}
+                }
+            }
+            reader.close();
+        } catch (Exception e) {}
+    }
+
+    public static void saveStaffDetect() {
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_staffdetect.txt"));
+            writer.write("green="  + staffStarGreen);  writer.newLine();
+            writer.write("blue="   + staffStarBlue);   writer.newLine();
+            writer.write("purple=" + staffStarPurple); writer.newLine();
+            writer.write("other="  + staffStarOther);  writer.newLine();
+            writer.write("text="   + staffTextRanks);
             writer.close();
         } catch (Exception e) {}
     }
@@ -498,20 +697,25 @@ public class Krypton implements ModInitializer {
     // KEYBINDING HELPERS
     // ==========================================
 
-    // Liest den aktuell gebundenen Key-Code aus einem KeyBinding (non-final Feld = boundKey).
-    // Funktioniert mapping-unabhängig weil defaultKey immer final ist.
-    static int getBoundKeyCode(KeyBinding binding) {
+    // Liest das aktuell gebundene InputUtil.Key aus einem KeyBinding
+    // (non-final Feld = boundKey). Funktioniert mapping-unabhängig weil
+    // defaultKey immer final ist.
+    static InputUtil.Key getBoundKey(KeyBinding binding) {
         try {
             for (java.lang.reflect.Field f : KeyBinding.class.getDeclaredFields()) {
                 if (f.getType() == InputUtil.Key.class
                         && !java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
                     f.setAccessible(true);
-                    InputUtil.Key key = (InputUtil.Key) f.get(binding);
-                    return key != null ? key.getCode() : GLFW.GLFW_KEY_UNKNOWN;
+                    return (InputUtil.Key) f.get(binding);
                 }
             }
         } catch (Exception ignored) {}
-        return GLFW.GLFW_KEY_UNKNOWN;
+        return null;
+    }
+
+    static int getBoundKeyCode(KeyBinding binding) {
+        InputUtil.Key key = getBoundKey(binding);
+        return key != null ? key.getCode() : GLFW.GLFW_KEY_UNKNOWN;
     }
 
     // Setzt den bound Key eines registrierten KeyBinding und aktualisiert die interne Map.
@@ -566,6 +770,281 @@ public class Krypton implements ModInitializer {
     }
 
     // ==========================================
+    // SPAWNER-SCHUTZ (GUARD) – HÄRTUNG
+    // ==========================================
+    //
+    // Hintergrund (Vanilla-Mechanik, 1.21.11):
+    // MinecraftClient.tick() ruft handleBlockBreaking(...) mit einem Flag auf,
+    // das u.a. "currentScreen == null" und "mouse.isCursorLocked()" enthält.
+    // Sobald IRGENDEIN Screen offen ist – Pausenmenü, Chat, Inventar, eine vom
+    // Server geöffnete GUI – wird stattdessen cancelBlockBreaking() aufgerufen
+    // und der Abbaufortschritt fällt auf 0 zurück. Zusätzlich ruft setScreen()
+    // beim Öffnen KeyBinding.unpressAll() auf, wodurch der vom Guard gedrückte
+    // Attack-Key wieder losgeht.
+    // Genau das ist die Ursache der "baut plötzlich nicht mehr ab"-Bugs:
+    //   * ESC (oder Fokusverlust bei aktivem "Pause on Lost Focus") öffnet das
+    //     GameMenuScreen → Abbau tot.
+    //   * Nach dem Schließen eines Screens ist der Cursor u.U. nicht wieder
+    //     gegriffen → Abbau tot.
+    //
+    // Gegenmaßnahmen (alle drei zusammen, weil jede einzelne Lücken lässt):
+    //   1. openGameMenu() wird im MinecraftClientMixin geblockt – das ist der
+    //      einzige Vanilla-Einstieg ins Pausenmenü (ESC und Fokusverlust).
+    //   2. setScreen() filtert blockierende Screens raus (isScreenBlocked).
+    //   3. Der Guard baut NICHT mehr über den Vanilla-Pfad ab, sondern ruft
+    //      updateBlockBreakingProgress() selbst auf – wie die Freecam. Damit
+    //      ist der Abbau komplett unabhängig von Screen, Cursor-Lock und
+    //      Fensterfokus. Vanilla-handleBlockBreaking wird währenddessen
+    //      gecancelt, sonst würden sich beide Pfade gegenseitig abbrechen
+    //      (derselbe Desync wie bei der Freecam, siehe MinecraftClientMixin).
+    //
+    // Serverseitig ändert das NICHTS am Paketbild: es werden dieselben
+    // PlayerAction- und Swing-Pakete geschickt wie beim manuellen Abbau, und
+    // nur auf Blöcke, die ein echter Raycast in Blickrichtung auch trifft.
+
+    /** Guard ist scharf und wir sind in einer Welt. Basis für Menü-Sperre und Auto-Sneak. */
+    public static boolean guardLockActive() {
+        // Billigster Test zuerst: die Methode wird aus dem setScreen-Mixin
+        // gerufen, also auch waehrend des Client-Starts.
+        if (!isAutoSpawnerActive) return false;
+        MinecraftClient c = MinecraftClient.getInstance();
+        return c != null && c.world != null && c.player != null;
+    }
+
+    /** Guard führt gerade den Notfall-Abbau aus. */
+    public static boolean guardIsMining() {
+        return isAutoSpawnerActive && isMining && !isFreecamActive;
+    }
+
+    /** Dauer-Sneak, solange der Guard scharf ist und keine Interaktion angemeldet wurde. */
+    public static boolean shouldForceSneak() {
+        return guardLockActive() && sneakSuppressTicks <= 0;
+    }
+
+    /**
+     * Meldet eine bevorstehende Rechtsklick-Interaktion an und pausiert den
+     * Auto-Sneak. Notwendig, weil der Server bei einem sneakenden Spieler
+     * KEINE Block-GUI öffnet (ServerPlayerInteractionManager prüft
+     * shouldCancelInteraction() → also isSneaking()). Ohne diese Pause würde
+     * der Bones Farmer nie die Spawner-GUI aufbekommen bzw. – mit Block im
+     * Slot – sogar einen Block setzen.
+     */
+    public static void suppressSneak(int ticks) {
+        if (ticks > sneakSuppressTicks) sneakSuppressTicks = ticks;
+    }
+
+    /** true, sobald der Sneak serverseitig wirklich aus ist (STOP_SNEAKING ist raus). */
+    public static boolean isSneakReleased(MinecraftClient client) {
+        return client.player == null || !client.player.isSneaking();
+    }
+
+    /** Echter, physischer Tastenzustand eines KeyBindings (unabhängig von setPressed). */
+    private static boolean isBindingPhysicallyDown(MinecraftClient client, KeyBinding binding) {
+        try {
+            InputUtil.Key key = getBoundKey(binding);
+            if (key == null) return false;
+            int code = key.getCode();
+            if (code == GLFW.GLFW_KEY_UNKNOWN) return false;
+            if (key.getCategory() == InputUtil.Type.MOUSE) {
+                return GLFW.glfwGetMouseButton(client.getWindow().getHandle(), code) == GLFW.GLFW_PRESS;
+            }
+            if (key.getCategory() == InputUtil.Type.KEYSYM) {
+                return InputUtil.isKeyPressed(client.getWindow(), code);
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /**
+     * Dauer-Sneak anwenden. Läuft in START_CLIENT_TICK, also VOR
+     * KeyboardInput.tick() im selben Tick. Dadurch entsteht beim Loslassen der
+     * echten Sneak-Taste kein einzelner Tick ohne Sneak – und damit auch kein
+     * STOP_SNEAKING/START_SNEAKING-Paketpaar, das einem Anti-Cheat auffallen
+     * würde. Der Weg über das KeyBinding ist bewusst gewählt: der Server sieht
+     * exakt dasselbe wie bei einem Spieler, der Shift gedrückt hält.
+     */
+    private static void applyForceSneak(MinecraftClient client) {
+        if (client == null || client.options == null) return;
+        if (shouldForceSneak()) {
+            client.options.sneakKey.setPressed(true);
+            forcedSneakLastTick = true;
+        } else if (forcedSneakLastTick) {
+            // Genau einmal zurücksetzen – und dabei den ECHTEN Tastenzustand
+            // wiederherstellen. Sonst hinge Sneak fest, wenn der User Shift
+            // gerade gedrückt hält, während der Guard ausgeht.
+            client.options.sneakKey.setPressed(isBindingPhysicallyDown(client, client.options.sneakKey));
+            forcedSneakLastTick = false;
+        }
+        if (sneakSuppressTicks > 0) sneakSuppressTicks--;
+    }
+
+    /**
+     * Entscheidet, ob ein Screen geöffnet werden darf, solange der Guard scharf ist.
+     * Bewusst eine BLOCKLIST und keine Allowlist: unbekannte Screens
+     * (Disconnect, Tod, Ladebildschirm, Ressourcenpack-Abfrage) müssen
+     * durchkommen, sonst kann sich der Client festfahren.
+     */
+    public static boolean isScreenBlocked(Screen screen) {
+        if (screen == null) return false;
+        if (!guardLockActive()) return false;
+
+        String cn = screen.getClass().getName();
+        // Eigene Screens bleiben IMMER erreichbar – das ClickGUI ist der
+        // einzige Weg, den Guard wieder auszuschalten.
+        if (cn.startsWith("com.krypton.")) return false;
+
+        // Eigenes Inventar / Kreativmenü: blocken.
+        if (screen instanceof net.minecraft.client.gui.screen.ingame.InventoryScreen) return true;
+        if (screen instanceof net.minecraft.client.gui.screen.ingame.CreativeInventoryScreen) return true;
+        // Alle anderen HandledScreens kommen vom Server (Spawner-GUI, Order,
+        // Bestätigung) – die braucht der Bones Farmer. Im Notfall schließt sie
+        // ensureGuardReady() sauber per closeHandledScreen().
+        if (screen instanceof HandledScreen<?>) return false;
+
+        // Pausenmenü: hängt an ESC UND an "Pause on Lost Focus" beim Alt-Tab.
+        if (screen instanceof net.minecraft.client.gui.screen.GameMenuScreen) return true;
+        // Chat exakt per getClass() – so bleibt der SleepingChatScreen erlaubt,
+        // sonst läge der Spieler ohne UI im Bett fest.
+        if (screen.getClass() == net.minecraft.client.gui.screen.ChatScreen.class) return true;
+        if (screen instanceof net.minecraft.client.gui.screen.advancement.AdvancementsScreen) return true;
+        if (screen instanceof net.minecraft.client.gui.screen.StatsScreen) return true;
+        if (screen instanceof net.minecraft.client.gui.screen.multiplayer.SocialInteractionsScreen) return true;
+        if (cn.startsWith("net.minecraft.client.gui.screen.option.")) return true;
+
+        return false;
+    }
+
+    /**
+     * Watchdog. Läuft jeden Tick, solange der Guard scharf ist, und stellt
+     * sicher, dass wirklich jederzeit abgebaut werden kann.
+     */
+    private static void ensureGuardReady(MinecraftClient client) {
+        if (!guardLockActive()) return;
+
+        // 1) Ein gesperrter Screen, der schon offen war, bevor der Guard scharf
+        //    gemacht wurde, wird sofort geschlossen.
+        if (isScreenBlocked(client.currentScreen)) {
+            client.setScreen(null);
+        }
+
+        // 2) Im Notfall hat der Abbau absolute Priorität: eine vom Server
+        //    geöffnete GUI wird sauber geschlossen (closeHandledScreen schickt
+        //    das CloseHandledScreen-Paket, also kein Desync).
+        if (guardEngaged && client.player != null
+                && client.currentScreen instanceof HandledScreen<?>) {
+            client.player.closeHandledScreen();
+        }
+
+        // 3) Mauszeiger wieder greifen. Ohne Cursor-Lock lässt Vanilla weder
+        //    Umsehen noch Abbau zu. lockCursor() ist ein No-Op ohne
+        //    Fensterfokus – der Abbau läuft dann über unseren eigenen Pfad
+        //    trotzdem weiter.
+        if (client.currentScreen == null && client.mouse != null
+                && !client.mouse.isCursorLocked() && client.isWindowFocused()) {
+            client.mouse.lockCursor();
+        }
+    }
+
+    /**
+     * Raycast in die AKTUELLE Blickrichtung. Liefert nur einen Treffer, wenn der
+     * Strahl wirklich den Ziel-Spawner trifft und dieser in normaler
+     * Interaktionsreichweite liegt – exakt so, wie es auch der Server nachrechnet.
+     * Damit kann nie ein Abbau-Paket für einen Block rausgehen, den ein echter
+     * Spieler gar nicht treffen könnte.
+     */
+    private static BlockHitResult guardRaycastTarget(MinecraftClient client, BlockPos target) {
+        if (client.world == null || client.player == null || target == null) return null;
+        Vec3d start = client.player.getEyePos();
+        double reach = client.player.getBlockInteractionRange();
+        Vec3d dir = Vec3d.fromPolar(client.player.getPitch(), client.player.getYaw());
+        Vec3d end = start.add(dir.multiply(reach));
+        BlockHitResult hit = client.world.raycast(new RaycastContext(
+                start, end, RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, client.player));
+        if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target)) return hit;
+        return null;
+    }
+
+    private static boolean matchesAny(String lower, String[] patterns) {
+        for (String pattern : patterns) {
+            if (lower.contains(pattern)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Kategorisiert einen Disconnect-Grund.
+     *   3 = NIE neu verbinden (Ban, Kick durch Staff, Whitelist, falsche Version …)
+     *   1 = Session-/Auth-Problem
+     *   2 = technischer Abbruch (Exception, Netty, Timeout, kaputtes Paket)
+     *   0 = alles andere
+     * Reihenfolge ist wichtig: Kategorie 3 gewinnt immer. Ein Ban-Text, der
+     * zufaellig auch "exception" enthaelt, darf keinen Reconnect ausloesen.
+     */
+    static int classifyDisconnect(String reason) {
+        if (reason == null) return 0;
+        String r = reason.toLowerCase();
+        if (matchesAny(r, NEVER_RECONNECT_PATTERNS))  return 3;
+        if (matchesAny(r, SESSION_KICK_PATTERNS))     return 1;
+        if (matchesAny(r, TECHNICAL_KICK_PATTERNS))   return 2;
+        return 0;
+    }
+
+    static String disconnectCategoryName(int cat) {
+        return switch (cat) {
+            case 1 -> "SESSION";
+            case 2 -> "TECHNIK";
+            case 3 -> "KEIN-REJOIN";
+            default -> "SONSTIGES";
+        };
+    }
+
+    static String sessionFixModeName() {
+        return switch (sessionFixMode) {
+            case 0 -> "STRIKT";
+            case 2 -> "ALLES";
+            default -> "TECHNIK";
+        };
+    }
+
+    /** Greift der Session-Fix fuer diese Kategorie im aktuellen Modus? */
+    static boolean sessionFixApplies(int cat) {
+        if (!isSessionFixActive) return false;
+        return switch (cat) {
+            case 1 -> true;                 // echte Session-Fehler immer
+            case 2 -> sessionFixMode >= 1;  // technische Abbrueche ab Modus TECHNIK
+            case 3 -> false;                // Ban/Kick: niemals
+            default -> sessionFixMode >= 2; // unbekannte Gruende nur im Modus ALLES
+        };
+    }
+
+    /**
+     * Wie oft darf hintereinander neu verbunden werden? Bei einem echten
+     * Session-Fehler bringt Dauerfeuer nichts (und belastet nur den
+     * Mojang-Auth-Server), technische Abbrueche erholen sich dagegen oft.
+     */
+    static int sessionFixMaxTries(int cat) {
+        return cat == 1 ? 3 : 5;
+    }
+
+    /** Haengt einen Trenngrund vorne an das Disconnect-Log (max. 20 Eintraege). */
+    private static void logDisconnect(String reason, int cat, String action) {
+        String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
+        String clean = reason == null ? "" : reason.replace((char) 167, '&').replace('\n', ' ').trim();
+        if (clean.length() > 110) clean = clean.substring(0, 110) + "...";
+        String color = switch (cat) {
+            case 1 -> "§e";
+            case 2 -> "§6";
+            case 3 -> "§c";
+            default -> "§7";
+        };
+        disconnectHistory.add(0, "§8[" + time + "] " + color + disconnectCategoryName(cat)
+                + " §8→ §f" + action + " §8| §7" + clean);
+        while (disconnectHistory.size() > 20) disconnectHistory.remove(disconnectHistory.size() - 1);
+        saveDisconnectLog();
+    }
+
+    // ==========================================
     // FREECAM LOGIK
     // ==========================================
 
@@ -613,6 +1092,9 @@ public class Krypton implements ModInitializer {
         loadBonesFarmerKey();
         loadDropBase();
         loadDiscordConfig();
+        loadSafetyLogout();
+        loadStaffDetect();
+        loadDisconnectLog();
 
         openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.krypton.gui",
@@ -634,6 +1116,13 @@ public class Krypton implements ModInitializer {
         ));
 
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> saveCheatStates());
+
+        // Auto-Sneak muss VOR der Spieler-Bewegung laufen. START_CLIENT_TICK
+        // hängt am Kopf von MinecraftClient.tick(), also vor world.tickEntities()
+        // und damit vor KeyboardInput.tick(). Würde man das erst in
+        // END_CLIENT_TICK setzen, gäbe es beim Loslassen der echten Sneak-Taste
+        // jedes Mal einen Tick ohne Sneak (STOP/START-Paketpaar).
+        ClientTickEvents.START_CLIENT_TICK.register(Krypton::applyForceSneak);
 
         // Chat-Listener: Delivery-Bestätigung erkennen ("delivered" / "bones" + "complete")
         // CHAT-Kanal (Spieler-Nachrichten und Plugin-Broadcasts)
@@ -715,9 +1204,13 @@ public class Krypton implements ModInitializer {
             if (client.world != null) {
                 ticksConnected++;
                 // wasSafetyLogout erst nach 60 Ticks echter Verbindung clearen –
-                // verhindert Reset während des kurzen Disconnect-Übergangs (1-2 Ticks)
+                // verhindert Reset während des kurzen Disconnect-Übergangs (1-2 Ticks).
+                // Weil Auto-Reconnect UND Session-Fix bei gesetztem Flag komplett
+                // gesperrt sind, kann diese Verbindung nur eine manuelle sein –
+                // genau dann (und nur dann) darf die Sperre wieder fallen.
                 if (ticksConnected > 60) {
-                    wasSafetyLogout = false;
+                    if (wasSafetyLogout) setSafetyLogout(false);
+                    sessionFixAttempts = 0;
                 }
                 attemptIndex = 0;
                 reconnectTicks = -1;
@@ -725,32 +1218,93 @@ public class Krypton implements ModInitializer {
                 ticksConnected = 0;
             }
 
-            // --- AUTO RECONNECT TICK LOGIK ---
-            if (client.currentScreen instanceof net.minecraft.client.gui.screen.DisconnectedScreen && !(client.currentScreen instanceof KryptonReconnectScreen)) {
-                if (isAutoReconnectActive && !wasSafetyLogout && lastServer != null) {
-                    int delay = -1;
+            // --- AUTO RECONNECT / SESSION FIX TICK LOGIK ---
+            boolean onDisconnectScreen =
+                client.currentScreen instanceof net.minecraft.client.gui.screen.DisconnectedScreen
+                && !(client.currentScreen instanceof KryptonReconnectScreen);
+            // Sobald wir weder auf dem Disconnect- noch auf unserem eigenen Screen
+            // sind, ist die Trennung abgehakt – naechster Disconnect wird wieder
+            // ausgewertet.
+            if (!onDisconnectScreen && !(client.currentScreen instanceof KryptonReconnectScreen)) {
+                disconnectHandled = false;
+            }
+
+            if (onDisconnectScreen && !disconnectHandled) {
+                disconnectHandled = true;   // pro Trennung genau einmal auswerten
+
+                // Disconnect-Grund per Reflection aus dem ersten Text-Feld des
+                // Vanilla-Screens lesen (mapping-unabhängig).
+                Text reasonText = Text.literal("Verbindung vom Server getrennt.");
+                try {
+                    for (java.lang.reflect.Field f : net.minecraft.client.gui.screen.DisconnectedScreen.class.getDeclaredFields()) {
+                        if (f.getType() == Text.class) {
+                            f.setAccessible(true);
+                            Object v = f.get(client.currentScreen);
+                            if (v != null) reasonText = (Text) v;
+                            break;
+                        }
+                    }
+                } catch (Exception e) {}
+
+                String reasonRaw = reasonText.getString();
+                int cat = classifyDisconnect(reasonRaw);
+
+                int  delay       = -1;
+                Text hint        = null;
+                boolean autoBlocked = false;
+                String action;
+
+                if (wasSafetyLogout) {
+                    // HARTE SPERRE. Nach dem Notfall-Logout wird NIE automatisch
+                    // neu verbunden – weder über Auto Reconnect noch über den
+                    // Session-Fix. Sonst stünde der Client Sekunden später wieder
+                    // auf dem Server, während der Gegner noch bei den Spawnern ist.
+                    autoBlocked = true;
+                    hint = Text.literal("§4Notfall-Logout aktiv §7– Auto-Reconnect gesperrt.");
+                    action = "gesperrt (Notfall-Logout)";
+                } else if (lastServer == null) {
+                    // Kein Server bekannt (z.B. direkt nach einem Client-Neustart).
+                    action = "kein Server bekannt";
+                } else if (sessionFixApplies(cat)) {
+                    int maxTries = sessionFixMaxTries(cat);
+                    if (sessionFixAttempts < maxTries) {
+                        sessionFixAttempts++;
+                        // Kurzer Delay: sowohl der Session-Aussetzer als auch ein
+                        // Netty-/Paketfehler sind beim nächsten Join meist weg.
+                        delay = 5;
+                        hint  = Text.literal("§eSession-Fix (" + disconnectCategoryName(cat) + ") §7– Versuch "
+                                             + sessionFixAttempts + "/" + maxTries);
+                        action = "Session-Fix " + sessionFixAttempts + "/" + maxTries;
+                    } else if (cat == 1) {
+                        // Mehr geht aus einem Mod heraus nicht: ein echtes Re-Auth
+                        // bräuchte den Microsoft-Refresh-Token des Launchers.
+                        hint = Text.literal("§cSession dauerhaft ungültig §7– Client neu starten (Re-Auth nötig).");
+                        action = "aufgegeben (Re-Auth nötig)";
+                    } else {
+                        hint = Text.literal("§c" + maxTries + " Versuche erfolglos §7– Server oder Verbindung prüfen.");
+                        action = "aufgegeben nach " + maxTries + " Versuchen";
+                    }
+                } else if (isAutoReconnectActive) {
                     if (attemptIndex < reconnectDelays.size()) {
                         delay = reconnectDelays.get(attemptIndex);
                     } else if (isInfiniteReconnect && !reconnectDelays.isEmpty()) {
                         delay = reconnectDelays.get(reconnectDelays.size() - 1);
                     }
+                    action = delay != -1 ? ("Auto-Reconnect " + delay + "s") : "Reconnect-Liste erschöpft";
+                } else {
+                    action = "kein Reconnect aktiv";
+                }
 
-                    if (delay != -1) {
-                        reconnectTicks = delay * 20 + (int)(Math.random() * 30 - 15);
-                        if (reconnectTicks < 20) reconnectTicks = 20;
+                logDisconnect(reasonRaw, cat, action);
 
-                        Text reasonText = Text.literal("Verbindung vom Server getrennt.");
-                        try {
-                            for (java.lang.reflect.Field f : net.minecraft.client.gui.screen.DisconnectedScreen.class.getDeclaredFields()) {
-                                if (f.getType() == Text.class) {
-                                    f.setAccessible(true);
-                                    reasonText = (Text) f.get(client.currentScreen);
-                                    break;
-                                }
-                            }
-                        } catch (Exception e) {}
-                        client.setScreen(new KryptonReconnectScreen(reasonText));
-                    }
+                if (delay != -1) {
+                    reconnectTicks = delay * 20 + (int)(Math.random() * 30 - 15);
+                    if (reconnectTicks < 20) reconnectTicks = 20;
+                    client.setScreen(new KryptonReconnectScreen(reasonText, hint, false));
+                } else if (hint != null) {
+                    // Kein automatischer Reconnect, aber der Grund soll sichtbar sein.
+                    reconnectTicks = -1;
+                    client.setScreen(new KryptonReconnectScreen(reasonText, hint, autoBlocked));
                 }
             }
 
@@ -784,8 +1338,17 @@ public class Krypton implements ModInitializer {
                 spawnerScriptActive = false;
                 spawnerScriptState = 0;
                 spawnerScriptCurrentTarget = null;
+                guardEngaged = false;
+                sneakSuppressTicks = 0;
+                guardAimFailTicks = 0;
+                guardSneakWaitTicks = 0;
                 return;
             }
+
+            // --- GUARD WATCHDOG ---
+            // Muss VOR allem anderen laufen: sorgt dafuer, dass kein gesperrter
+            // Screen offen bleibt und der Mauszeiger gegriffen ist.
+            ensureGuardReady(client);
 
             // --- DISCORD POLL ---
             discordPollTimer++;
@@ -871,7 +1434,14 @@ public class Krypton implements ModInitializer {
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                     }
 
-                    if (isRightClicking && rightClickCooldown <= 0) {
+                    // Auch hier gilt: sneakend öffnet der Server keine Block-GUI.
+                    // Läuft der Dauer-Sneak des Guards, wird er für die Dauer des
+                    // Rechtsklicks abgemeldet. Ist der Guard aus, greift die
+                    // Bedingung gar nicht – dann bleibt alles wie vorher.
+                    if (isRightClicking) suppressSneak(8);
+                    boolean sneakBlocksUse = isAutoSpawnerActive && !isSneakReleased(client);
+
+                    if (isRightClicking && rightClickCooldown <= 0 && !sneakBlocksUse) {
                         Vec3d start = client.player.getEyePos();
                         Vec3d dir   = Vec3d.fromPolar(freecamPitch, freecamYaw);
                         double reach = client.player.getBlockInteractionRange();
@@ -969,10 +1539,11 @@ public class Krypton implements ModInitializer {
                     String rank = getPlayerRank(client, p);
 
                     if (!rank.isEmpty()) {
-                        // Staff → Guard aus, still halten, nichts abbauen
+                        // Staff → Guard aus, still halten, nichts abbauen.
+                        // sneakKey wird bewusst NICHT angefasst: applyForceSneak()
+                        // stellt im nächsten Tick den echten Tastenzustand wieder her.
                         isAutoSpawnerActive = false;
                         client.options.attackKey.setPressed(false);
-                        client.options.sneakKey.setPressed(false);
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                         isMining = false;
                         hasMinedSpawner = false;
@@ -980,6 +1551,9 @@ public class Krypton implements ModInitializer {
                         actionDelayTimer = 0;
                         lastTargetSpawner = null;
                         safetyLogoutTimer = -1;
+                        guardEngaged = false;
+                        guardAimFailTicks = 0;
+                        guardSneakWaitTicks = 0;
                         break;
                     }
 
@@ -1011,11 +1585,15 @@ public class Krypton implements ModInitializer {
                     }
                 }
 
+                // Notfall-Modus: ab hier hat der Abbau Vorrang vor allem anderen
+                // (Server-GUIs werden geschlossen, der Bones Farmer pausiert).
+                guardEngaged = enemyFound || hasMinedSpawner;
+
                 if (isMining && lastTargetSpawner != null) {
                     if (!client.world.getBlockState(lastTargetSpawner).isOf(Blocks.SPAWNER)) {
                         client.options.attackKey.setPressed(false);
-                        client.options.sneakKey.setPressed(false);
                         isMining = false;
+                        guardAimFailTicks = 0;
                         autoSpawnerState = 0;
                         actionDelayTimer = 4 + (int)(Math.random() * 6);
                         lastTargetSpawner = null;
@@ -1109,14 +1687,22 @@ public class Krypton implements ModInitializer {
                             break;
 
                         case 3:
-                            client.options.sneakKey.setPressed(true);
-                            autoSpawnerState = 4;
-                            actionDelayTimer = 1 + (int)(Math.random() * 2);
+                            // Sneak hält der Dauer-Sneak (applyForceSneak) bereits.
+                            // Hier wird nur abgewartet, bis er serverseitig wirklich
+                            // anliegt – dann erst startet der Abbau. Nach 10 Ticks
+                            // wird trotzdem weitergemacht, damit der Guard im Notfall
+                            // niemals hängen bleibt.
+                            if (client.player.isSneaking() || ++guardSneakWaitTicks > 10) {
+                                guardSneakWaitTicks = 0;
+                                autoSpawnerState = 4;
+                                actionDelayTimer = 1 + (int)(Math.random() * 2);
+                            }
                             break;
 
                         case 4:
                             client.options.attackKey.setPressed(true);
                             isMining = true;
+                            guardAimFailTicks = 0;
                             autoSpawnerState = 5;
                             break;
 
@@ -1141,6 +1727,41 @@ public class Krypton implements ModInitializer {
 
                             client.player.setYaw(client.player.getYaw() + safeYawDrift);
                             client.player.setPitch(client.player.getPitch() + safePitchDrift);
+
+                            // EIGENER Abbau statt Vanilla-handleBlockBreaking.
+                            // Vanilla würde hier an drei Stellen aussteigen: offener
+                            // Screen, nicht gegriffener Mauszeiger, attackCooldown.
+                            // Genau das sind die "baut plötzlich nicht mehr ab"-Bugs.
+                            // Über den eigenen Raycast ist der Abbau davon komplett
+                            // unabhängig – und trotzdem serverkonform, weil nur auf
+                            // einen Block gefeuert wird, den der Strahl in echter
+                            // Blickrichtung und innerhalb der Interaktionsreichweite
+                            // trifft. Vanilla wird währenddessen im
+                            // MinecraftClientMixin gecancelt, sonst brechen sich
+                            // beide Pfade gegenseitig ab (gleicher Desync wie Freecam).
+                            BlockHitResult guardHit = guardRaycastTarget(client, lastTargetSpawner);
+                            if (guardHit != null && client.interactionManager != null) {
+                                guardAimFailTicks = 0;
+                                client.interactionManager.updateBlockBreakingProgress(guardHit.getBlockPos(), guardHit.getSide());
+                                client.player.swingHand(Hand.MAIN_HAND);
+                            } else {
+                                // Ziel verdeckt oder außer Reichweite.
+                                if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
+                                guardAimFailTicks++;
+                                if (guardAimFailTicks > 60) {
+                                    // Nach 3 Sekunden aufgeben: Ziel freigeben, damit
+                                    // der Guard weitermacht bzw. der Safety-Logout
+                                    // greift, statt für immer in State 5 zu hängen.
+                                    guardAimFailTicks = 0;
+                                    isMining = false;
+                                    client.options.attackKey.setPressed(false);
+                                    lastTargetSpawner = null;
+                                    autoSpawnerState = 0;
+                                    actionDelayTimer = 4 + (int)(Math.random() * 6);
+                                } else if (guardAimFailTicks > 5) {
+                                    autoSpawnerState = 2; // nochmal sauber anvisieren
+                                }
+                            }
                             break;
                     }
 
@@ -1154,17 +1775,23 @@ public class Krypton implements ModInitializer {
                     } else if (safetyLogoutTimer == 0) {
                         if (isMining) {
                             client.options.attackKey.setPressed(false);
-                            client.options.sneakKey.setPressed(false);
                             isMining = false;
                         }
+                        if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                         autoSpawnerState = 0;
                         actionDelayTimer = 0;
                         isAutoSpawnerActive = false;
-                        wasSafetyLogout = true;
+                        // PERSISTENT setzen: ab jetzt ist jeder automatische Rejoin
+                        // gesperrt – auch nach einem Client-Neustart. Erst eine
+                        // manuelle Verbindung (60 Ticks stabil) hebt die Sperre auf.
+                        setSafetyLogout(true);
                         ticksConnected = 0;
                         safetyLogoutTimer = -1;
                         lastTargetSpawner = null;
                         hasMinedSpawner = false;
+                        guardEngaged = false;
+                        guardAimFailTicks = 0;
+                        guardSneakWaitTicks = 0;
 
                         if (client.getNetworkHandler() != null) {
                             client.getNetworkHandler().getConnection().disconnect(Text.literal("§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout."));
@@ -1175,20 +1802,27 @@ public class Krypton implements ModInitializer {
                     autoSpawnerState = 0;
                     actionDelayTimer = 0;
                     lastTargetSpawner = null;
+                    guardAimFailTicks = 0;
+                    guardSneakWaitTicks = 0;
                     if (isMining) {
                         client.options.attackKey.setPressed(false);
-                        client.options.sneakKey.setPressed(false);
+                        if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                         isMining = false;
                     }
                 }
             } else {
+                // Guard aus oder Freecam an: kompletter Reset. sneakKey bleibt
+                // unberührt – applyForceSneak() gibt die Taste sauber frei.
                 safetyLogoutTimer = -1;
                 autoSpawnerState = 0;
                 actionDelayTimer = 0;
                 lastTargetSpawner = null;
+                guardEngaged = false;
+                guardAimFailTicks = 0;
+                guardSneakWaitTicks = 0;
                 if (isMining) {
                     client.options.attackKey.setPressed(false);
-                    client.options.sneakKey.setPressed(false);
+                    if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                     isMining = false;
                 }
             }
@@ -1222,10 +1856,14 @@ public class Krypton implements ModInitializer {
             if (isTracersActive) activeCheats.add("Tracers: §bON");
             if (isFreecamActive) activeCheats.add("Freecam: §aON");
             if (isFullbrightActive) activeCheats.add("Fullbright: §eON");
-            if (isAutoSpawnerActive) activeCheats.add("Guard: §eON");
+            // Guard zeigt mit an, dass Menüs gesperrt sind – sonst wundert man
+            // sich, warum ESC nichts tut.
+            if (isAutoSpawnerActive) activeCheats.add("Guard: " + (guardEngaged ? "§4EINSATZ" : "§eON") + " §8[Menüs gesperrt]");
             if (isBonesFarmerActive) activeCheats.add("Bones: §aON");
             if (isSpawnerEspActive) activeCheats.add("Spawner ESP: §dON");
             if (isAutoReconnectActive) activeCheats.add("Reconnect: §aON");
+            if (isSessionFixActive) activeCheats.add("Session Fix: §aON");
+            if (wasSafetyLogout) activeCheats.add("§4Rejoin gesperrt (Notfall-Logout)");
 
             if (activeCheats.isEmpty()) return;
 
@@ -1415,6 +2053,13 @@ public class Krypton implements ModInitializer {
     private void tickBonesFarmer(MinecraftClient client) {
         if (!isBonesFarmerActive || client.world == null || client.player == null) return;
         if (isFreecamActive) return;
+        // Notfall des Spawner-Schutzes hat Vorrang: der Farmer würde sonst
+        // weiter in GUIs klicken, während der Guard abbauen und ausloggen will.
+        if (guardEngaged) {
+            if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
+            bonesFarmerState = 0; bonesFarmerDelay = 5;
+            return;
+        }
         if (isStaffNearby(client)) {
             isBonesFarmerActive = false;
             bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false;
@@ -1484,6 +2129,20 @@ public class Krypton implements ModInitializer {
             // RECHTSKLICK AUF SPAWNER – echter Raycast (wie freecam)
             case 3:
                 if (bonesFarmerTargetSpawner==null || client.interactionManager==null) { bonesFarmerState=1; break; }
+                // WICHTIG: Ein sneakender Spieler bekommt serverseitig KEINE
+                // Block-GUI (ServerPlayerInteractionManager prüft
+                // shouldCancelInteraction() → isSneaking()); mit einem Block in
+                // der Hand würde stattdessen sogar gesetzt werden. Läuft der
+                // Dauer-Sneak des Guards, wird er hier kurz abgemeldet und erst
+                // rechtsgeklickt, wenn der Sneak serverseitig wirklich aus ist.
+                // Nur relevant, solange der Guard scharf ist – ohne Guard sneakt
+                // hier niemand und der Farmer läuft unverändert weiter.
+                if (shouldForceSneak() || (isAutoSpawnerActive && !isSneakReleased(client))) {
+                    suppressSneak(8);
+                    bonesFarmerDelay = 2;
+                    break;
+                }
+                suppressSneak(8); // Fenster offen halten, bis die GUI da ist
                 Vec3d eye3 = client.player.getEyePos();
                 Vec3d dir3 = Vec3d.fromPolar(client.player.getPitch(), client.player.getYaw());
                 double reach3 = client.player.getBlockInteractionRange();
@@ -2174,16 +2833,162 @@ public class Krypton implements ModInitializer {
         }
     }
 
-    private static String getPlayerRank(MinecraftClient client, PlayerEntity p) {
+    // ==========================================
+    // STAFF-ERKENNUNG
+    // ==========================================
+    //
+    // Zwei unabhaengige Signale, in dieser Reihenfolge:
+    //   1. STERN-RANK  – aktuelles Server-Format: ein farbiger Stern im Tab-
+    //      oder Team-Prefix. Die Farbe wird aus dem Text-Component-Style ODER
+    //      aus Legacy-§-Codes im Rohstring gelesen (beides kommt vor) und ueber
+    //      den Farbton (Hue) einer Familie zugeordnet. Dadurch funktioniert es
+    //      auch mit RGB-Hex-Farben, nicht nur mit den 16 Vanilla-Codes.
+    //   2. KLARTEXT    – die alte Erkennung ("admin", "[mod" …) als Fallback,
+    //      abschaltbar ueber staffTextRanks.
+    //
+    // Fail-Safe-Gedanke: fuer den Guard zaehlt nur "Staff ja/nein". Die Farbe
+    // bestimmt ausschliesslich das Label. Welche Familien als Staff gelten, ist
+    // konfigurierbar – der Staff-Scan-Screen zeigt live, was der Server
+    // tatsaechlich schickt, damit man das ohne Raten einstellen kann.
+
+    /** Farbfamilie: 0 = unbestimmt, 1 = gruen, 2 = blau/aqua, 3 = lila/magenta, 4 = andere. */
+    static int starColorFamily(int rgb) {
+        if (rgb < 0) return 0;
+        int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+        int max = Math.max(r, Math.max(g, b));
+        int min = Math.min(r, Math.min(g, b));
+        if (max < 40) return 0;                        // nahezu schwarz
+        if ((max - min) * 255 < max * 60) return 0;    // Saettigung < ~23 % -> grau/weiss
+        float d = max - min;
+        float h;
+        if (max == r)      h = 60f * (((g - b) / d) % 6f);
+        else if (max == g) h = 60f * ((b - r) / d + 2f);
+        else               h = 60f * ((r - g) / d + 4f);
+        if (h < 0f) h += 360f;
+        if (h >= 75f  && h < 170f) return 1;   // gruen (0x55FF55 = 120°, 0x00AA00 = 120°)
+        if (h >= 170f && h < 265f) return 2;   // aqua/blau (0x55FFFF = 180°, 0x5555FF = 240°)
+        if (h >= 265f && h < 330f) return 3;   // lila/magenta (0xFF55FF = 300°)
+        return 4;                              // rot/orange/gelb
+    }
+
+    static String starRankName(int family) {
+        return switch (family) {
+            case 1 -> "Mod/Admin";
+            case 2 -> "Helper/Owner";
+            case 3 -> "Developer";
+            case 4 -> "Staff";
+            default -> "";
+        };
+    }
+
+    static boolean starFamilyIsStaff(int family) {
+        return switch (family) {
+            case 1 -> staffStarGreen;
+            case 2 -> staffStarBlue;
+            case 3 -> staffStarPurple;
+            case 4 -> staffStarOther;
+            default -> false;
+        };
+    }
+
+    /** RGB eines Legacy-§-Farbcodes, oder -1 wenn es kein Farbcode ist. */
+    private static int legacyColorRgb(char code) {
+        return switch (Character.toLowerCase(code)) {
+            case '0' -> 0x000000; case '1' -> 0x0000AA; case '2' -> 0x00AA00; case '3' -> 0x00AAAA;
+            case '4' -> 0xAA0000; case '5' -> 0xAA00AA; case '6' -> 0xFFAA00; case '7' -> 0xAAAAAA;
+            case '8' -> 0x555555; case '9' -> 0x5555FF; case 'a' -> 0x55FF55; case 'b' -> 0x55FFFF;
+            case 'c' -> 0xFF5555; case 'd' -> 0xFF55FF; case 'e' -> 0xFFFF55; case 'f' -> 0xFFFFFF;
+            default  -> -1;
+        };
+    }
+
+    /**
+     * Sammelt alle Stern-Glyphen eines Text-Components mit ihrer effektiven
+     * Farbe. Ergebnis pro Treffer: {codepoint, rgb} – rgb = -1 wenn farblos.
+     *
+     * Beruecksichtigt beide Faelle, die auf Servern vorkommen:
+     *   a) echte Text-Styles (Component-Baum) – ueber visit(StyledVisitor, Style)
+     *   b) Legacy-§-Codes im Rohstring, inkl. BungeeCord-Hex (§x§R§R§G§G§B§B)
+     */
+    static void collectStars(Text text, List<int[]> out) {
+        if (text == null) return;
+        try {
+            text.visit(new net.minecraft.text.StringVisitable.StyledVisitor<Object>() {
+                @Override
+                public java.util.Optional<Object> accept(net.minecraft.text.Style style, String str) {
+                    int styleRgb = -1;
+                    net.minecraft.text.TextColor tc = style.getColor();
+                    if (tc != null) styleRgb = tc.getRgb() & 0xFFFFFF;
+                    int cur = styleRgb;
+                    int i = 0;
+                    while (i < str.length()) {
+                        char c = str.charAt(i);
+                        if (c == 167 && i + 1 < str.length()) { // 167 = '§'
+                            char code = str.charAt(i + 1);
+                            if (code == 'x' || code == 'X') {
+                                // §x§R§R§G§G§B§B = 14 Zeichen
+                                if (i + 13 < str.length()) {
+                                    StringBuilder hex = new StringBuilder();
+                                    boolean ok = true;
+                                    for (int k = 0; k < 6; k++) {
+                                        if (str.charAt(i + 2 + k * 2) != 167) { ok = false; break; }
+                                        hex.append(str.charAt(i + 3 + k * 2));
+                                    }
+                                    if (ok) {
+                                        try { cur = Integer.parseInt(hex.toString(), 16) & 0xFFFFFF; }
+                                        catch (Exception ignored) {}
+                                        i += 14;
+                                        continue;
+                                    }
+                                }
+                                i += 2;
+                                continue;
+                            }
+                            if (code == 'r' || code == 'R') { cur = styleRgb; i += 2; continue; }
+                            int rgb = legacyColorRgb(code);
+                            if (rgb >= 0) cur = rgb;
+                            // Formatierungscodes (k/l/m/n/o) lassen die Farbe stehen
+                            i += 2;
+                            continue;
+                        }
+                        if (STAR_GLYPHS.indexOf(c) >= 0) out.add(new int[]{ c, cur });
+                        i++;
+                    }
+                    return java.util.Optional.empty();
+                }
+            }, net.minecraft.text.Style.EMPTY);
+        } catch (Exception ignored) {}
+    }
+
+    /** Rang aus den Sternen eines einzelnen Text-Components, oder "" . */
+    private static String scanStarRank(Text t) {
+        if (t == null) return "";
+        List<int[]> stars = new ArrayList<>();
+        collectStars(t, stars);
+        for (int[] st : stars) {
+            int fam = starColorFamily(st[1]);
+            if (starFamilyIsStaff(fam)) return starRankName(fam);
+        }
+        return "";
+    }
+
+    /** Tab-Listen-Display-Name eines Spielers (kann null sein). */
+    static Text getTabDisplayName(MinecraftClient client, PlayerEntity p) {
+        try {
+            if (client.getNetworkHandler() == null) return null;
+            net.minecraft.client.network.PlayerListEntry entry =
+                client.getNetworkHandler().getPlayerListEntry(p.getUuid());
+            return entry != null ? entry.getDisplayName() : null;
+        } catch (Exception ignored) { return null; }
+    }
+
+    /** Alte Klartext-Erkennung. */
+    private static String getTextRank(MinecraftClient client, PlayerEntity p) {
         StringBuilder combined = new StringBuilder();
 
         // 1. Tab-Listen Display-Name
-        if (client.getNetworkHandler() != null) {
-            net.minecraft.client.network.PlayerListEntry entry =
-                client.getNetworkHandler().getPlayerListEntry(p.getUuid());
-            if (entry != null && entry.getDisplayName() != null)
-                combined.append(entry.getDisplayName().getString()).append(" ");
-        }
+        Text tab = getTabDisplayName(client, p);
+        if (tab != null) combined.append(tab.getString()).append(" ");
 
         // 2. Entity Display-Name (Name über dem Kopf) – kann null sein bei frisch joinenden Spielern
         try {
@@ -2212,6 +3017,93 @@ public class Krypton implements ModInitializer {
         if (display.contains("srhelper") || display.contains("sr.helper")) return "Sr.Helper";
         if (display.contains("helper"))                                   return "Helper";
         return "";
+    }
+
+    private static String getPlayerRank(MinecraftClient client, PlayerEntity p) {
+        // 1) Stern-Rank – Quellen einzeln pruefen und beim ersten Treffer raus.
+        String r = scanStarRank(getTabDisplayName(client, p));
+        if (!r.isEmpty()) return r;
+        try {
+            r = scanStarRank(p.getDisplayName());
+            if (!r.isEmpty()) return r;
+        } catch (Exception ignored) {}
+        net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+        if (team != null) {
+            try { r = scanStarRank(team.getPrefix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
+            try { r = scanStarRank(team.getSuffix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
+            try { r = scanStarRank(team.getDisplayName()); if (!r.isEmpty()) return r; } catch (Exception ignored) {}
+        }
+
+        // 2) Klartext-Fallback
+        if (!staffTextRanks) return "";
+        return getTextRank(client, p);
+    }
+
+    /**
+     * Baut die Diagnose-Zeilen fuer den Staff-Scan-Screen. Zeigt fuer jeden
+     * sichtbaren Spieler, was der Server tatsaechlich schickt: den Rohtext mit
+     * sichtbar gemachten §-Codes, jeden gefundenen Stern mit Codepoint und
+     * Farbe, die daraus abgeleitete Familie und ob sie als Staff zaehlt.
+     * Damit laesst sich die Erkennung am echten Server verifizieren, statt sie
+     * zu raten.
+     */
+    static List<String> buildStaffScanLines(MinecraftClient client) {
+        List<String> lines = new ArrayList<>();
+        if (client.world == null || client.player == null) {
+            lines.add("§7Keine Welt geladen.");
+            return lines;
+        }
+        lines.add("§8Aktiv: §7grün=" + (staffStarGreen ? "§aan" : "§caus")
+                + " §7blau=" + (staffStarBlue ? "§aan" : "§caus")
+                + " §7lila=" + (staffStarPurple ? "§aan" : "§caus")
+                + " §7andere=" + (staffStarOther ? "§aan" : "§caus")
+                + " §7Text=" + (staffTextRanks ? "§aan" : "§caus"));
+        lines.add("");
+        List<PlayerEntity> snapshot = new ArrayList<>(client.world.getPlayers());
+        for (PlayerEntity p : snapshot) {
+            String name = p.getName().getString();
+            boolean wl = whitelistedPlayers.contains(name.toLowerCase());
+            String rank = getPlayerRank(client, p);
+            int dist = (int) Math.round(Math.sqrt(client.player.squaredDistanceTo(p)));
+            lines.add("§f" + name + " §8| §7" + dist + "m"
+                    + (wl ? " §a[Whitelist]" : "")
+                    + (p == client.player ? " §b[ich]" : "")
+                    + " §8| " + (rank.isEmpty() ? "§7kein Staff" : "§cSTAFF: " + rank));
+            addStaffScanSource(lines, "Tab", getTabDisplayName(client, p));
+            try { addStaffScanSource(lines, "Name", p.getDisplayName()); } catch (Exception ignored) {}
+            net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+            if (team != null) {
+                try { addStaffScanSource(lines, "Team-Prefix", team.getPrefix()); } catch (Exception ignored) {}
+                try { addStaffScanSource(lines, "Team-Suffix", team.getSuffix()); } catch (Exception ignored) {}
+            }
+            lines.add("");
+        }
+        if (snapshot.isEmpty()) lines.add("§7Keine Spieler in Sicht.");
+        return lines;
+    }
+
+    private static void addStaffScanSource(List<String> lines, String label, Text t) {
+        if (t == null) return;
+        String raw = t.getString();
+        if (raw == null) raw = "";
+        // §-Codes sichtbar machen (167 = '§'), damit man den Rohtext lesen kann
+        String vis = raw.replace((char) 167, '&');
+        if (vis.length() > 48) vis = vis.substring(0, 48) + "...";
+        List<int[]> stars = new ArrayList<>();
+        collectStars(t, stars);
+        StringBuilder sb = new StringBuilder("  §8" + label + ": §7" + vis);
+        if (stars.isEmpty()) {
+            sb.append(" §8(kein Stern)");
+        } else {
+            for (int[] st : stars) {
+                int fam = starColorFamily(st[1]);
+                sb.append(String.format(" §8| U+%04X", st[0]));
+                sb.append(st[1] < 0 ? " §8#------" : String.format(" §8#%06X", st[1]));
+                sb.append(" §8").append(fam == 0 ? "unbestimmt" : starRankName(fam));
+                sb.append(starFamilyIsStaff(fam) ? " §a[STAFF]" : " §c[egal]");
+            }
+        }
+        lines.add(sb.toString());
     }
 
     private static boolean isStaffNearby(MinecraftClient client) {
@@ -2243,11 +3135,25 @@ public class Krypton implements ModInitializer {
     // ==========================================
     public static class KryptonReconnectScreen extends Screen {
         private final Text reason;
+        private final Text hint;         // Zusatzzeile (Session-Fix / Notfall-Logout), darf null sein
+        private final boolean autoBlocked; // true = Reconnect ist gesperrt (Notfall-Logout)
         private ButtonWidget reconnectBtn;
 
         public KryptonReconnectScreen(Text reason) {
+            this(reason, null, false);
+        }
+
+        public KryptonReconnectScreen(Text reason, Text hint, boolean autoBlocked) {
             super(Text.literal("Connection Lost"));
             this.reason = reason;
+            this.hint = hint;
+            this.autoBlocked = autoBlocked;
+        }
+
+        private Text reconnectLabel() {
+            if (autoBlocked)        return Text.literal("§8Reconnect gesperrt");
+            if (reconnectTicks < 0) return Text.literal("Jetzt neu verbinden");
+            return Text.literal("Reconnect in " + (reconnectTicks / 20) + "...");
         }
 
         @Override
@@ -2255,13 +3161,20 @@ public class Krypton implements ModInitializer {
             int cX = width / 2;
             int cY = height / 2;
 
-            reconnectBtn = addDrawableChild(ButtonWidget.builder(Text.literal("Reconnect in " + (reconnectTicks / 20) + "..."), b -> {
+            reconnectBtn = addDrawableChild(ButtonWidget.builder(reconnectLabel(), b -> {
                 reconnectTicks = 0;
             }).dimensions(cX - 100, cY + 20, 200, 20).build());
+            // Nach dem Notfall-Logout ist auch der manuelle Knopf tot – sonst wäre
+            // die Sperre mit einem versehentlichen Klick wieder ausgehebelt.
+            reconnectBtn.active = !autoBlocked;
 
-            addDrawableChild(ButtonWidget.builder(Text.literal("Cancel"), b -> {
-                isAutoReconnectActive = false;
-                saveReconnect();
+            // Bei gesperrtem Rejoin (Notfall-Logout) ist der Auto-Reconnect nicht
+            // die Ursache – dann wird er hier auch nicht heimlich abgeschaltet.
+            addDrawableChild(ButtonWidget.builder(Text.literal(autoBlocked ? "Zum Serverbrowser" : "Cancel"), b -> {
+                if (!autoBlocked) {
+                    isAutoReconnectActive = false;
+                    saveReconnect();
+                }
                 client.setScreen(new net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen(new net.minecraft.client.gui.screen.TitleScreen()));
             }).dimensions(cX - 100, cY + 45, 200, 20).build());
         }
@@ -2271,8 +3184,11 @@ public class Krypton implements ModInitializer {
             super.render(c, mouseX, mouseY, delta);
             c.drawCenteredTextWithShadow(textRenderer, title, width / 2, height / 2 - 50, 0xFFFFFF);
             c.drawCenteredTextWithShadow(textRenderer, reason, width / 2, height / 2 - 30, 0xAAAAAA);
-            if (reconnectTicks >= 0 && reconnectBtn != null) {
-                reconnectBtn.setMessage(Text.literal("Reconnect in " + (reconnectTicks / 20) + "..."));
+            if (hint != null) {
+                c.drawCenteredTextWithShadow(textRenderer, hint, width / 2, height / 2 - 14, 0xFFFFFF);
+            }
+            if (reconnectBtn != null) {
+                reconnectBtn.setMessage(reconnectLabel());
             }
         }
     }
@@ -2335,6 +3251,168 @@ public class Krypton implements ModInitializer {
             super.render(c, mouseX, mouseY, delta);
             c.drawCenteredTextWithShadow(textRenderer, "Delays (in Sekunden)", width / 2, 45, 0xFFFFFF);
         }
+    }
+
+    // ==========================================
+    // DISCONNECT LOG SCREEN
+    // ==========================================
+    // Zeigt die letzten 20 Trenngründe im Klartext samt erkannter Kategorie und
+    // der daraus abgeleiteten Aktion. Auf Servern, die bei jedem Bug eine andere
+    // Fehlermeldung schicken, ist das die Grundlage, um den Session-Fix-Modus
+    // sinnvoll zu wählen.
+    public static class DisconnectLogScreen extends Screen {
+        private final Screen parent;
+        public DisconnectLogScreen(Screen parent) {
+            super(Text.literal("Disconnect Log"));
+            this.parent = parent;
+        }
+
+        @Override
+        protected void init() {
+            int cX = width / 2;
+            addDrawableChild(ButtonWidget.builder(
+                Text.literal("Modus: §b" + sessionFixModeName()), b -> {
+                    sessionFixMode = (sessionFixMode + 1) % 3;
+                    saveCheatStates();
+                    b.setMessage(Text.literal("Modus: §b" + sessionFixModeName()));
+                }).dimensions(cX - 155, height - 30, 100, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Log löschen"), b -> {
+                    disconnectHistory.clear();
+                    saveDisconnectLog();
+                }).dimensions(cX - 50, height - 30, 100, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Zurück"), b -> client.setScreen(parent))
+                .dimensions(cX + 55, height - 30, 100, 20).build());
+        }
+
+        @Override
+        public void render(DrawContext c, int mouseX, int mouseY, float delta) {
+            super.render(c, mouseX, mouseY, delta);
+
+            List<String> view = new ArrayList<>(disconnectHistory);
+            String head = "§eLetzte Trenngründe §8(Session-Fix: "
+                        + (isSessionFixActive ? "§aan" : "§caus") + "§8, Modus §b" + sessionFixModeName() + "§8)";
+
+            int longest = textRenderer.getWidth(head);
+            for (String v : view) longest = Math.max(longest, textRenderer.getWidth(v));
+            float scaleW = Math.min(1f, (width - 16) / (float) Math.max(1, longest));
+            int available = height - 40 - 8;
+            float scaleH = Math.min(1f, available / (float) (16 + Math.max(1, view.size()) * 10));
+            float scale  = Math.min(scaleW, scaleH);
+
+            c.getMatrices().pushMatrix();
+            c.getMatrices().scale(scale, scale);
+            int x = (int) (8 / scale);
+            int y = (int) (10 / scale);
+            c.drawText(textRenderer, head, x, y, 0xFFFFAA00, true);
+            y += 14;
+            if (view.isEmpty()) {
+                c.drawText(textRenderer, "§7Noch keine Trennung aufgezeichnet.", x, y, -1, true);
+            } else {
+                for (String v : view) {
+                    c.drawText(textRenderer, v, x, y, -1, true);
+                    y += 10;
+                }
+            }
+            c.getMatrices().popMatrix();
+        }
+
+        @Override
+        public boolean shouldPause() { return false; }
+    }
+
+    // ==========================================
+    // STAFF SCAN SCREEN (RANG-DIAGNOSE)
+    // ==========================================
+    // Zeigt fuer jeden sichtbaren Spieler, was der Server wirklich schickt, und
+    // wie Krypton das bewertet. Damit laesst sich die Stern-Erkennung am echten
+    // Server pruefen, statt sie zu raten – und die Farbfamilien lassen sich hier
+    // direkt an-/abschalten.
+    public static class StaffScanScreen extends Screen {
+        private final Screen parent;
+        private List<String> lines = new ArrayList<>();
+        private int page = 0;
+        private static final int PER_PAGE = 15;
+
+        public StaffScanScreen(Screen parent) {
+            super(Text.literal("Staff Scan"));
+            this.parent = parent;
+        }
+
+        private void refresh() {
+            lines = buildStaffScanLines(client);
+            int maxPage = Math.max(0, (lines.size() - 1) / PER_PAGE);
+            if (page > maxPage) page = maxPage;
+        }
+
+        private void famBtn(String label, int x, int y, int w,
+                            java.util.function.BooleanSupplier get, Runnable toggle) {
+            addDrawableChild(ButtonWidget.builder(
+                Text.literal(label + ": " + (get.getAsBoolean() ? "§aAN" : "§cAUS")), b -> {
+                    toggle.run();
+                    saveStaffDetect();
+                    b.setMessage(Text.literal(label + ": " + (get.getAsBoolean() ? "§aAN" : "§cAUS")));
+                    refresh();
+                }).dimensions(x, y, w, 20).build());
+        }
+
+        @Override
+        protected void init() {
+            refresh();
+            int cX = width / 2;
+
+            // Farbfamilien-Schalter
+            int bw = Math.max(58, Math.min(110, (width - 24) / 5));
+            int tot = bw * 5 + 8;
+            int bx = cX - tot / 2;
+            int by = height - 56;
+            famBtn("Grün",   bx,            by, bw, () -> staffStarGreen,  () -> staffStarGreen  = !staffStarGreen);
+            famBtn("Blau",   bx + bw + 2,   by, bw, () -> staffStarBlue,   () -> staffStarBlue   = !staffStarBlue);
+            famBtn("Lila",   bx + 2*bw + 4, by, bw, () -> staffStarPurple, () -> staffStarPurple = !staffStarPurple);
+            famBtn("Andere", bx + 3*bw + 6, by, bw, () -> staffStarOther,  () -> staffStarOther  = !staffStarOther);
+            famBtn("Text",   bx + 4*bw + 8, by, bw, () -> staffTextRanks,  () -> staffTextRanks  = !staffTextRanks);
+
+            // Steuerzeile
+            addDrawableChild(ButtonWidget.builder(Text.literal("Aktualisieren"), b -> refresh())
+                .dimensions(cX - 160, height - 30, 90, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("<"), b -> { if (page > 0) page--; })
+                .dimensions(cX - 66, height - 30, 30, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal(">"), b -> {
+                    if ((page + 1) * PER_PAGE < lines.size()) page++;
+                }).dimensions(cX - 32, height - 30, 30, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Zurück"), b -> client.setScreen(parent))
+                .dimensions(cX + 6, height - 30, 90, 20).build());
+        }
+
+        @Override
+        public void render(DrawContext c, int mouseX, int mouseY, float delta) {
+            super.render(c, mouseX, mouseY, delta);
+
+            int maxPage = Math.max(0, (lines.size() - 1) / PER_PAGE);
+            String title = "§eStaff Scan §8– Seite " + (page + 1) + "/" + (maxPage + 1);
+            c.drawCenteredTextWithShadow(textRenderer, Text.literal(title), width / 2, 8, 0xFFFFAA00);
+
+            // Auf Breite skalieren, damit auch lange Diagnosezeilen lesbar bleiben
+            int longest = 200;
+            int from = page * PER_PAGE;
+            int to   = Math.min(lines.size(), from + PER_PAGE);
+            for (int i = from; i < to; i++) {
+                longest = Math.max(longest, textRenderer.getWidth(lines.get(i)));
+            }
+            float scale = Math.min(1f, (width - 16) / (float) longest);
+
+            c.getMatrices().pushMatrix();
+            c.getMatrices().scale(scale, scale);
+            int y = (int) (22 / scale);
+            int lh = 10;
+            for (int i = from; i < to; i++) {
+                c.drawText(textRenderer, lines.get(i), (int) (8 / scale), y, -1, true);
+                y += lh;
+            }
+            c.getMatrices().popMatrix();
+        }
+
+        @Override
+        public boolean shouldPause() { return false; }
     }
 
     // ==========================================
@@ -2563,7 +3641,7 @@ public class Krypton implements ModInitializer {
         private boolean isEnteringDropCount = false;
         private String  dropCountInput      = "";
         private boolean wasMouseDown        = false;
-        private final float[] dotAnim      = new float[17]; // per-module 0→1
+        private final float[] dotAnim      = new float[24]; // per-module 0→1
 
         // ── Layout ──────────────────────────────────────────────────────────
         // Column width: max 185 px, shrinks if screen is too narrow to fit all cols
@@ -2594,18 +3672,20 @@ public class Krypton implements ModInitializer {
         //     8=PlayerLogs(screen)  9=LogoutLogs(screen)  10=FreecamKey(rebind)
         //     11=ReconnectCfg(screen)  12=HoleSize(input)  13=BonesFarm(toggle)
         //     14=BonesKey(rebind)  15=BonesDropBase(input)  16=Tracers(toggle)
-        //     17=Whitelist(screen)
+        //     17=Whitelist(screen)  18=SessionFix(toggle)  19=StaffScan(screen)
+        //     20=SessionTest(action) 21=RejoinLock(toggle) 22=DisconnectLog(screen)
+        //     23=SessionMode(cycle)
         private static final String[] CATS  = { "MISC",  "BASEFINDING", "RENDER",  "CLIENT" };
         private static final int[]    IC_COL = { 0xFF8B8FA8, 0xFF44BBFF, 0xFFAA55FF, 0xFF44CCFF };
         private static final int[][]  MODS   = {
-            //  MISC: Freecam, FreecamKey, DisableOnDmg
-            { 0, 10, 3 },
+            //  MISC: Freecam, FreecamKey, DisableOnDmg, StaffScan, DisconnectLog, SessionTest, RejoinLock
+            { 0, 10, 3, 19, 22, 20, 21 },
             //  BASEFINDING: BedrockFinder, MinHoleSize
             { 4, 12 },
             //  RENDER: PlayerESP, Tracers, SpawnerESP, Fullbright
             { 5, 16, 6, 7 },
-            //  CLIENT: AutoSpawner, AutoReconnect, ReconnectSet, Whitelist, PlayerLogs, LogoutLogs, BonesFarm, BonesKey, BonesDropBase
-            { 1, 2, 11, 17, 8, 9, 13, 14, 15 }
+            //  CLIENT: AutoSpawner, AutoReconnect, SessionFix, ReconnectSet, Whitelist, PlayerLogs, LogoutLogs, BonesFarm, BonesKey, BonesDropBase
+            { 1, 2, 18, 23, 11, 17, 8, 9, 13, 14, 15 }
         };
         private static final String[] MNAME  = {
             /* 0 */ "FREECAM",
@@ -2625,7 +3705,13 @@ public class Krypton implements ModInitializer {
             /* 14*/ "BONES KEY",
             /* 15*/ "BONES DROP",
             /* 16*/ "TRACERS",
-            /* 17*/ "WHITELIST"
+            /* 17*/ "WHITELIST",
+            /* 18*/ "SESSION FIX",
+            /* 19*/ "STAFF SCAN",
+            /* 20*/ "SESSION TEST",
+            /* 21*/ "REJOIN LOCK",
+            /* 22*/ "DISCONNECT LOG",
+            /* 23*/ "SESSION MODE"
         };
 
         protected ClickGuiScreen() { super(Text.literal("Krypton")); }
@@ -2643,6 +3729,8 @@ public class Krypton implements ModInitializer {
                 case 7  -> isFullbrightActive;
                 case 13 -> isBonesFarmerActive;
                 case 16 -> isTracersActive;
+                case 18 -> isSessionFixActive;
+                case 21 -> wasSafetyLogout;
                 default -> false;
             };
         }
@@ -2658,6 +3746,25 @@ public class Krypton implements ModInitializer {
                 case 6  ->   isSpawnerEspActive     = !isSpawnerEspActive;
                 case 7  -> { isFullbrightActive     = !isFullbrightActive;   saveFullbright(); }
                 case 16 ->   isTracersActive        = !isTracersActive;
+                case 18 -> { isSessionFixActive     = !isSessionFixActive;   saveCheatStates(); }
+                case 19 ->   client.setScreen(new StaffScanScreen(this));
+                case 22 ->   client.setScreen(new DisconnectLogScreen(this));
+                // Wie breit der Session-Fix reagiert: STRIKT -> TECHNIK -> ALLES
+                case 23 -> { sessionFixMode = (sessionFixMode + 1) % 3; saveCheatStates(); }
+                case 20 -> {
+                    // TEST: simuliert einen "Invalid Session"-Kick, damit sich der
+                    // Session-Fix-Pfad (Erkennung → Reconnect) ohne echten
+                    // Serverkick pruefen laesst. Die Notfall-Logout-Sperre gilt
+                    // dabei ganz normal – genau das will man ja mittesten.
+                    if (client.getNetworkHandler() != null) {
+                        client.setScreen(null);
+                        client.getNetworkHandler().getConnection().disconnect(
+                            Text.literal("Invalid session (Try restarting your game and the launcher)"));
+                    }
+                }
+                // Notfall-Logout-Sperre manuell setzen/aufheben. Ohne das koennte
+                // man die Sperre nur durch einen manuellen Join wieder loswerden.
+                case 21 ->   setSafetyLogout(!wasSafetyLogout);
                 case 17 ->   client.setScreen(new WhitelistScreen(this));
                 case 8  ->   client.setScreen(new PlayerLogScreen(this));
                 case 9  ->   client.setScreen(new LogoutLogScreen(this));
@@ -2773,6 +3880,8 @@ public class Krypton implements ModInitializer {
             }
             dotAnim[13] += ((isBonesFarmerActive ? 1f : 0f) - dotAnim[13]) * 0.22f;
             dotAnim[16] += ((isTracersActive      ? 1f : 0f) - dotAnim[16]) * 0.22f;
+            dotAnim[18] += ((isSessionFixActive   ? 1f : 0f) - dotAnim[18]) * 0.22f;
+            dotAnim[21] += ((wasSafetyLogout      ? 1f : 0f) - dotAnim[21]) * 0.22f;
 
             // Mouse edge-detection via LWJGL (API-version agnostic)
             long win = client.getWindow().getHandle();
@@ -2817,7 +3926,7 @@ public class Krypton implements ModInitializer {
                     boolean on    = modOn(mi);
                     boolean hover = mx >= x && mx < x+cw && my >= ry && my < ry+ROW_H;
 
-                    boolean isToggle = (mi < 8 || mi == 13 || mi == 16);
+                    boolean isToggle = (mi < 8 || mi == 13 || mi == 16 || mi == 18 || mi == 21);
                     if (on && isToggle) ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_ACT);
                     if (hover)         ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_HOV);
 
@@ -2862,6 +3971,10 @@ public class Krypton implements ModInitializer {
                         ctx.drawText(textRenderer, hs,
                             x+cw-textRenderer.getWidth(hs)-5, ry+(ROW_H-8)/2,
                             isEnteringHoleSize ? 0xFF44BBFF : C_DASH, false);
+                    } else if (mi == 23) {
+                        String sm = "[" + sessionFixModeName() + "]";
+                        ctx.drawText(textRenderer, sm,
+                            x+cw-textRenderer.getWidth(sm)-5, ry+(ROW_H-8)/2, C_DASH, false);
                     } else if (mi == 15) {
                         String dl = isEnteringDropCount ? (dropCountInput + "|") : ("[" + bonesFarmerDropBase + "]");
                         ctx.drawText(textRenderer, dl,
