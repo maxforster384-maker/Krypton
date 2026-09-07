@@ -166,8 +166,10 @@ Beim Deaktivieren → `chunkCullingEnabled = true`.
 **Pro Tick:**
 - **Damage-Abbruch:** Wenn `disableFreecamOnDamage && player.hurtTime > 0`
   → Freecam sofort aus.
-- **Velocity:** horizontale Velocity wird auf 0 gesetzt (kein Sliding),
-  Y bleibt erhalten (Schwerkraft / vertikaler Knockback bleiben "echt").
+- **Velocity:** wird **nicht** angefasst. Früher wurde X/Z jeden Tick auf 0 gesetzt —
+  ein Anti-Cheat-Vektor: kein Knockback, kein Treiben im Wasser, Bewegungs-
+  Vorhersage (Grim) schlägt fehl. Der Körper steht trotzdem, weil der
+  `KeyboardInputMixin` alle Eingaben nullt; Restmomentum läuft wie in Vanilla aus.
 - **Body-Freeze:** `setYaw/setPitch/setHeadYaw/setBodyYaw` **und** `lastYaw/lastPitch/lastHeadYaw/lastBodyYaw` (`freezePlayerRotation()`) auf
   `displayYaw/displayPitch` — kein sichtbares Zittern für andere Spieler.
 - **prev\*-Snapshot** für Frame-Interpolation.
@@ -178,8 +180,8 @@ Beim Deaktivieren → `chunkCullingEnabled = true`.
   `updateBlockBreakingProgress()` + `swingHand()`, umschlossen von
   `isManualInteraction = true/false`, damit die Interaktions-Callbacks nicht blocken.
   Ohne Linksklick → `cancelBlockBreaking()`.
-- **Rechtsklick (Interaktion):** Raycast **in Freecam-Blickrichtung**
-  (`freecamPitch/freecamYaw`), `interactBlock()`, Cooldown 4 Ticks.
+- **Rechtsklick (Interaktion):** Raycast **in der eingefrorenen Blickrichtung** wie der Abbau
+  (`savedPitch/savedYaw`), `interactBlock()`, Cooldown 4 Ticks. Nie in Kamerarichtung — sonst interagiert der Spieler aus Serversicht mit einem Block hinter seinem Rücken.
 
 **Beteiligte Mixins:** `CameraMixin`, `EntityMixin`, `GameRendererMixin`,
 `KeyboardInputMixin`, `MinecraftClientMixin`, `PerspectiveMixin`,
@@ -493,7 +495,7 @@ oder GUI-Modul 13. Wird bei Freecam pausiert. Bei **Staff in der Nähe**
 | 10 | Spawner-GUI schließen |
 | 20 | `countBonesInInventory()`; bei 0 → `bonesFarmerEmptyCycles++`, nach **2** leeren Zyklen schaltet sich der Bot ab. Sonst `/order bones` senden |
 | 21 | Warten auf die GUI mit "deliver" im Titel; Timeout 400 Ticks |
-| 22 | Bones einliefern — bis zu **4** Bone-Slots pro Tick per `QUICK_MOVE`, Cursor wird via `snapCursorToSlot()` auf den ersten bewegt. Enthält Chest-Voll-, Drop-, Stall- und Delivery-Timer-Detection (siehe unten) |
+| 22 | Bones einliefern — **ein** Bone-Slot pro 2 Ticks per `QUICK_MOVE` (~10 Klicks/s statt 80), Cursor wird via `snapCursorToSlot()` auf den ersten bewegt. Enthält Chest-Voll-, Drop-, Stall- und Delivery-Timer-Detection (siehe unten) |
 | 23 | Delivery-GUI schließen (Server öffnet daraufhin den Confirm-Dialog) |
 | 24 | Warten auf Screen mit "confirm"/"bestätig" im Titel; Timeout 100 Ticks |
 | 25 | Confirm klicken: 1) Lime/Green Stained Glass Pane, 2) Fallback Text "confirm", 3) sonst Screen schließen |
@@ -733,6 +735,12 @@ Klartext-Fallback sind einzeln schaltbar (`krypton_staffdetect.txt`), und der
 Rohtext mit sichtbar gemachten `§`-Codes, jeden gefundenen Stern mit Codepoint
 und Hex-Farbe, die abgeleitete Familie und ob sie als Staff zählt.
 **Vor dem Scharfschalten auf einem neuen Server einmal dort gegenprüfen.**
+
+**0. Media-Ausschluss (`NON_STAFF_KEYWORDS`).** Steht `media`, `youtube`, `streamer`,
+`creator`, `partner` o. ä. im Tab-/Team-Text und **kein** echtes Staff-Wort, gilt der
+Spieler als normaler Spieler — **auch mit farbigem Stern**. Media kann nicht bannen;
+vor einem YouTuber soll der Guard die Spawner sichern, nicht still halten. Gilt für
+Scan **und** Guard (`getPlayerRank()` → `rankOf()`).
 
 `isStaffNearby()` prüft alle Spieler in Distanz² ≤ 1600 (40 Blöcke), ohne
 Whitelist-Einträge.
@@ -1090,6 +1098,8 @@ Server-GUIs werden nicht über feste Slot-Indizes, sondern über Inhalt erkannt:
 - Brownian-Motion-Drift statt periodischer Muster
 - Micro-Jitter auf Rotationen beim Bones Farmer
 - Reconnect-Delays mit ±15-Tick-Jitter
+- Freecam lässt Velocity/Knockback unangetastet und interagiert nur in Körper-Blickrichtung
+- Bones Farmer: max. ~10 GUI-Klicks/s (4–8 Ticks zwischen Klicks, ein Shift-Klick pro 2 Ticks)
 - `snapCursorToSlot()` bewegt den echten OS-Cursor mit ±3 px Jitter auf den Slot
 - Automatisches Abschalten bei erkanntem Staff (Guard **und** Bones Farmer)
 

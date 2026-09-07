@@ -1615,10 +1615,14 @@ public class Krypton implements ModInitializer {
                     return;
                 }
 
-                // Horizontale Velocity nullen – verhindert Sliding durch restliches Momentum
-                // Y-Achse bleibt erhalten (Schwerkraft, Knockback-Vertikal für Anti-Cheat)
-                Vec3d vel = client.player.getVelocity();
-                client.player.setVelocity(0.0, vel.y, 0.0);
+                // Velocity BEWUSST NICHT anfassen. Früher wurde X/Z jeden Tick auf 0
+                // gesetzt ("kein Sliding") – genau das ist ein Anti-Cheat-Vektor:
+                // der Server simuliert die Physik selbst (Reibung, Wasser, Eis,
+                // Knockback) und vergleicht mit der gemeldeten Position. Ein Spieler,
+                // der bei einem Treffer keinen Knockback nimmt oder im Wasser nicht
+                // treibt, fällt bei Grim & Co. sofort auf (Prediction/Knockback-
+                // Check). Der Körper steht trotzdem still, weil KeyboardInputMixin
+                // alle Bewegungseingaben nullt – Restmomentum läuft wie in Vanilla aus.
 
                 // Spieler-Kopf/Body EXAKT einfrieren – kein Rauschen mehr.
                 // Der Spieler steht perfekt still, kein sichtbares Zittern für
@@ -1669,7 +1673,11 @@ public class Krypton implements ModInitializer {
 
                     if (isRightClicking && rightClickCooldown <= 0 && !sneakBlocksUse) {
                         Vec3d start = client.player.getEyePos();
-                        Vec3d dir   = Vec3d.fromPolar(freecamPitch, freecamYaw);
+                        // Wie beim Abbau: in der EINGEFRORENEN Körper-Blickrichtung,
+                        // nicht in Kamerarichtung. Sonst interagiert der Spieler aus
+                        // Serversicht mit einem Block, den er gar nicht ansieht –
+                        // ein klassischer Interaktions-Richtungs-Check.
+                        Vec3d dir   = Vec3d.fromPolar(savedPitch, savedYaw);
                         double reach = client.player.getBlockInteractionRange();
                         Vec3d end = start.add(dir.multiply(reach));
                         BlockHitResult hit = client.world.raycast(new RaycastContext(start, end, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, client.player));
@@ -2422,7 +2430,7 @@ public class Krypton implements ModInitializer {
                     client.interactionManager.clickSlot(hs5.getScreenHandler().syncId, dropSlot, 0, SlotActionType.PICKUP, client.player);
                     dropLootClicksDone++;
                     bonesFarmerState = dropLootClicksDone>=dropLootClicksTarget ? 10 : 7;
-                    bonesFarmerDelay = 1 + (int)(Math.random()*3); // 1-3 Ticks
+                    bonesFarmerDelay = 4 + (int)(Math.random()*5); // 4-8 Ticks (200-400 ms) – menschliches Klicktempo
                 }
                 break;
 
@@ -2438,7 +2446,7 @@ public class Krypton implements ModInitializer {
                         client.interactionManager.clickSlot(hs7.getScreenHandler().syncId, nextSlot, 0, SlotActionType.PICKUP, client.player);
                     }
                 }
-                bonesFarmerState=5; bonesFarmerDelay=1+(int)(Math.random()*3); // 1-3 Ticks
+                bonesFarmerState=5; bonesFarmerDelay=4+(int)(Math.random()*5); // 4-8 Ticks – menschliches Klicktempo
                 break;
 
             // ESC – SPAWNER-GUI SCHLIESSEN → dann /order bones
@@ -2544,9 +2552,11 @@ public class Krypton implements ModInitializer {
                     arrowsBeforeSpawner = bonesNow;
                     bonesFarmerLastChestCount = chestCount;
 
-                    // Bis zu 4 verschiedene Bone-Slots, Cursor zum ersten
+                    // EIN Bone-Slot pro Durchlauf, danach 1 Tick Pause (~10 Klicks/s).
+                    // Vorher: 4 Shift-Klicks im selben Tick = 80 Klicks/s – das
+                    // schafft kein Mensch und fällt bei Klickraten-Checks sofort auf.
                     int clicked = 0;
-                    for (int i = ps22; i < sh22.slots.size() && clicked < 4; i++) {
+                    for (int i = ps22; i < sh22.slots.size() && clicked < 1; i++) {
                         Slot s22 = sh22.slots.get(i);
                         if (s22.hasStack() && s22.getStack().isOf(Items.BONE)) {
                             if (clicked == 0) snapCursorToSlot(client, hs22, i);
@@ -2555,6 +2565,7 @@ public class Krypton implements ModInitializer {
                         }
                     }
                     if (clicked == 0) { bonesFarmerState=23; bonesFarmerDelay=2; }
+                    else bonesFarmerDelay = 1;  // Delivery-/Stall-Timer zählen damit halb so schnell (5 s → ~10 s) – gewollt
                 }
                 break;
 
@@ -3259,7 +3270,8 @@ public class Krypton implements ModInitializer {
         return textRankOf(sourcesOf(client, p));
     }
 
-    static String textRankOf(RankSources s) {
+    /** Alle Textquellen eines Spielers als EIN kleingeschriebener String (Tab, Name über dem Kopf, Team). */
+    static String combinedRankText(RankSources s) {
         StringBuilder combined = new StringBuilder();
 
         // 1. Tab-Listen Display-Name
@@ -3281,8 +3293,11 @@ public class Krypton implements ModInitializer {
                 if (tdn != null) combined.append(tdn.getString()).append(" ");
             } catch (Exception ignored) {}
         }
+        return combined.toString().toLowerCase();
+    }
 
-        String display = combined.toString().toLowerCase();
+    static String textRankOf(RankSources s) {
+        String display = combinedRankText(s);
 
         if (display.contains("owner"))                                    return "Owner";
         if (display.contains("sradmin") || display.contains("sr.admin")) return "Sr.Admin";
@@ -3376,14 +3391,29 @@ public class Krypton implements ModInitializer {
         return "";
     }
 
-    /** Stern-Rank (falls plausibel) → Klartext-Fallback. Gleiche Logik wie getPlayerRank(). */
+    // Ränge, die KEIN Staff sind, obwohl sie oft einen farbigen Marker tragen.
+    // Media/YouTuber/Partner können nicht bannen – vor denen soll der Guard
+    // die Spawner ganz normal sichern und ausloggen, nicht "still halten".
+    private static final String[] NON_STAFF_KEYWORDS = {
+        "media", "youtube", "youtuber", "yt", "streamer", "twitch", "tiktok",
+        "creator", "content", "partner", "famous", "influencer"
+    };
+
+    /**
+     * Endgültiges Urteil: Staff ja/nein (+ Label).
+     *  0) Media & Co. → NIE Staff, auch nicht mit Stern (siehe NON_STAFF_KEYWORDS),
+     *     außer es steht zusätzlich ein echtes Staff-Wort (Admin/Mod/…) dabei.
+     *  1) Stern-Rank, sofern die Erkennung plausibel ist.
+     *  2) Klartext-Fallback.
+     */
     static String rankOf(RankSources s) {
+        String text = staffTextRanks ? textRankOf(s) : "";
+        if (text.isEmpty() && matchesAny(combinedRankText(s), NON_STAFF_KEYWORDS)) return "";
         if (staffDetectSane) {
             String r = starRankOf(s);
             if (!r.isEmpty()) return r;
         }
-        if (!staffTextRanks) return "";
-        return textRankOf(s);
+        return text;
     }
 
     /**
@@ -3418,16 +3448,9 @@ public class Krypton implements ModInitializer {
         staffDetectSane = !(total >= 5 && hits * 2 > total);
     }
 
+    /** Guard-Pfad: gleiche Logik wie der Scan (rankOf), inkl. Media-Ausschluss. */
     private static String getPlayerRank(MinecraftClient client, PlayerEntity p) {
-        // 1) Stern-Rank – nur wenn die Erkennung plausibel ist.
-        if (staffDetectSane) {
-            String r = starRankOf(client, p);
-            if (!r.isEmpty()) return r;
-        }
-
-        // 2) Klartext-Fallback
-        if (!staffTextRanks) return "";
-        return getTextRank(client, p);
+        return rankOf(sourcesOf(client, p));
     }
 
     /**
