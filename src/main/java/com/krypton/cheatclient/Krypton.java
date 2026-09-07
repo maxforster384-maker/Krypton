@@ -271,6 +271,11 @@ public class Krypton implements ModInitializer {
     // Ticks in denen der Ziel-Spawner nicht per Raycast getroffen wurde
     // (ausser Reichweite / verdeckt). Verhindert ein Haengenbleiben in State 5.
     private static int guardAimFailTicks = 0;
+    // Gegner in Reichweite, aber KEIN Spawner, den der Guard von hier aus
+    // treffen kann (alle >4,5 Blöcke entfernt oder verdeckt). Der Guard kann
+    // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
+    // in Sicherheit, während der Schutz faktisch nicht greift.
+    public static boolean guardNoReachableSpawner = false;
     // Spawner, die 3 s lang nicht getroffen wurden. Werden bei der nächsten
     // Zielwahl übersprungen, sonst wählt findReachableSpawner() sofort wieder
     // dasselbe unerreichbare Ziel und der Guard dreht sich im Kreis.
@@ -1531,6 +1536,7 @@ public class Krypton implements ModInitializer {
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
                 guardFailedTargets.clear();
+                guardNoReachableSpawner = false;
                 return;
             }
 
@@ -1769,6 +1775,9 @@ public class Krypton implements ModInitializer {
                 // Notfall-Modus: ab hier hat der Abbau Vorrang vor allem anderen
                 // (Server-GUIs werden geschlossen, der Bones Farmer pausiert).
                 guardEngaged = enemyFound || hasMinedSpawner;
+                // Gegner da, aber nichts Abbaubares in Sicht und noch nichts
+                // abgebaut → der Guard ist wirkungslos. Sichtbar machen (HUD).
+                guardNoReachableSpawner = enemyFound && spawnerPos == null && !hasMinedSpawner;
 
                 if (isMining && lastTargetSpawner != null) {
                     if (!client.world.getBlockState(lastTargetSpawner).isOf(Blocks.SPAWNER)) {
@@ -2007,6 +2016,7 @@ public class Krypton implements ModInitializer {
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
                 guardFailedTargets.clear();
+                guardNoReachableSpawner = false;
                 if (isMining) {
                     client.options.attackKey.setPressed(false);
                     if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -2045,7 +2055,12 @@ public class Krypton implements ModInitializer {
             if (isFullbrightActive) activeCheats.add("Fullbright: §eON");
             // Guard zeigt mit an, dass Menüs gesperrt sind – sonst wundert man
             // sich, warum ESC nichts tut.
-            if (isAutoSpawnerActive) activeCheats.add("Guard: " + (guardEngaged ? "§4EINSATZ" : "§eON") + " §8[Menüs gesperrt]");
+            if (isAutoSpawnerActive) {
+                String guardState = guardNoReachableSpawner
+                        ? "§cKEIN SPAWNER IN REICHWEITE"   // Gegner da, Guard kann nichts tun
+                        : (guardEngaged ? "§4EINSATZ" : "§eON");
+                activeCheats.add("Guard: " + guardState + " §8[Menüs gesperrt]");
+            }
             if (isBonesFarmerActive) activeCheats.add("Bones: §aON");
             if (isSpawnerEspActive) activeCheats.add("Spawner ESP: §dON");
             if (isAutoReconnectActive) activeCheats.add("Reconnect: §aON");
