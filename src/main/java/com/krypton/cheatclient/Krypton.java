@@ -3231,20 +3231,24 @@ public class Krypton implements ModInitializer {
 
     /** Alte Klartext-Erkennung. */
     private static String getTextRank(MinecraftClient client, PlayerEntity p) {
+        return textRankOf(sourcesOf(client, p));
+    }
+
+    static String textRankOf(RankSources s) {
         StringBuilder combined = new StringBuilder();
 
         // 1. Tab-Listen Display-Name
-        Text tab = getTabDisplayName(client, p);
+        Text tab = s.tab();
         if (tab != null) combined.append(tab.getString()).append(" ");
 
-        // 2. Entity Display-Name (Name über dem Kopf) – kann null sein bei frisch joinenden Spielern
+        // 2. Entity Display-Name (Name über dem Kopf) – null, wenn nur im Tab
         try {
-            net.minecraft.text.Text dn = p.getDisplayName();
+            net.minecraft.text.Text dn = s.entityName();
             if (dn != null) combined.append(dn.getString()).append(" ");
         } catch (Exception ignored) {}
 
         // 3. Scoreboard Team
-        net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+        net.minecraft.scoreboard.Team team = s.team();
         if (team != null) {
             combined.append(team.getName()).append(" ");
             try {
@@ -3267,20 +3271,94 @@ public class Krypton implements ModInitializer {
     }
 
     /** Nur der Stern-Anteil der Erkennung, ohne Plausibilitaetspruefung. */
-    static String starRankOf(MinecraftClient client, PlayerEntity p) {
-        String r = scanStarRank(getTabDisplayName(client, p));
-        if (!r.isEmpty()) return r;
+    /**
+     * Alles, was die Rang-Erkennung über einen Spieler wissen muss – bewusst
+     * UNABHÄNGIG davon, ob seine Entity geladen ist.
+     *
+     * Hintergrund: world.getPlayers() liefert nur Spieler in Renderdistanz.
+     * Auf DonutSMP stehen 80 Leute im Tab, aber nur die 2–3 in der Nähe sind
+     * als Entity da – der Staff-Scan zeigte deshalb nur einen selbst. Für die
+     * Diagnose (welches Symbol ist Deko, welches der echte Rang-Marker?) muss
+     * die komplette Tab-Liste her. Der Guard selbst bleibt bei Entities in
+     * 40 Blöcken, denn nur die sind eine Gefahr.
+     *
+     * entity ist null, wenn der Spieler nur im Tab steht.
+     */
+    private record RankSources(String name, Text tab, Text entityName,
+                               net.minecraft.scoreboard.Team team, PlayerEntity entity) {}
+
+    static RankSources sourcesOf(MinecraftClient client, PlayerEntity p) {
+        Text en = null;
+        try { en = p.getDisplayName(); } catch (Exception ignored) {}
+        return new RankSources(p.getName().getString(), getTabDisplayName(client, p), en,
+                               p.getScoreboardTeam(), p);
+    }
+
+    static RankSources sourcesOf(MinecraftClient client, net.minecraft.client.network.PlayerListEntry e) {
+        String name = "?";
+        PlayerEntity ent = null;
         try {
-            r = scanStarRank(p.getDisplayName());
-            if (!r.isEmpty()) return r;
+            // authlib 7.x (seit 1.21.9): GameProfile ist ein Record → id()/name()
+            name = e.getProfile().name();
+            if (client.world != null) ent = client.world.getPlayerByUuid(e.getProfile().id());
         } catch (Exception ignored) {}
-        net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+        Text tab = null;
+        try { tab = e.getDisplayName(); } catch (Exception ignored) {}
+        Text en = null;
+        if (ent != null) { try { en = ent.getDisplayName(); } catch (Exception ignored) {} }
+        net.minecraft.scoreboard.Team team = null;
+        try { team = e.getScoreboardTeam(); } catch (Exception ignored) {}
+        if (team == null && ent != null) team = ent.getScoreboardTeam();
+        return new RankSources(name, tab, en, team, ent);
+    }
+
+    /**
+     * Die komplette Tab-Liste als RankSources. Geladene Spieler zuerst, dann
+     * nach Distanz – so steht ein Staff in der Nähe ganz oben im Scan.
+     */
+    static List<RankSources> tabSources(MinecraftClient client) {
+        List<RankSources> out = new ArrayList<>();
+        if (client.getNetworkHandler() == null) return out;
+        for (net.minecraft.client.network.PlayerListEntry e
+                : new ArrayList<>(client.getNetworkHandler().getPlayerList())) {
+            out.add(sourcesOf(client, e));
+        }
+        final PlayerEntity me = client.player;
+        out.sort((a, b) -> {
+            boolean la = a.entity() != null, lb = b.entity() != null;
+            if (la != lb) return la ? -1 : 1;
+            if (!la || me == null) return a.name().compareToIgnoreCase(b.name());
+            return Double.compare(me.squaredDistanceTo(a.entity()), me.squaredDistanceTo(b.entity()));
+        });
+        return out;
+    }
+
+    static String starRankOf(MinecraftClient client, PlayerEntity p) {
+        return starRankOf(sourcesOf(client, p));
+    }
+
+    static String starRankOf(RankSources s) {
+        String r = scanStarRank(s.tab());
+        if (!r.isEmpty()) return r;
+        r = scanStarRank(s.entityName());
+        if (!r.isEmpty()) return r;
+        net.minecraft.scoreboard.Team team = s.team();
         if (team != null) {
             try { r = scanStarRank(team.getPrefix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
             try { r = scanStarRank(team.getSuffix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
             try { r = scanStarRank(team.getDisplayName()); if (!r.isEmpty()) return r; } catch (Exception ignored) {}
         }
         return "";
+    }
+
+    /** Stern-Rank (falls plausibel) → Klartext-Fallback. Gleiche Logik wie getPlayerRank(). */
+    static String rankOf(RankSources s) {
+        if (staffDetectSane) {
+            String r = starRankOf(s);
+            if (!r.isEmpty()) return r;
+        }
+        if (!staffTextRanks) return "";
+        return textRankOf(s);
     }
 
     /**
@@ -3300,11 +3378,14 @@ public class Krypton implements ModInitializer {
     private static void updateStaffSanity(MinecraftClient client) {
         if (client.world == null || client.player == null) return;
         int total = 0, hits = 0;
-        for (PlayerEntity p : new ArrayList<>(client.world.getPlayers())) {
-            if (p == client.player) continue;
-            if (whitelistedPlayers.contains(p.getName().getString().toLowerCase())) continue;
+        // Ueber die TAB-LISTE, nicht nur geladene Entities: bei 80 Spielern im
+        // Tab ist die 50-%-Regel aussagekraeftig, bei 2 Entities in der Naehe nicht.
+        String myName = client.player.getName().getString();
+        for (RankSources s : tabSources(client)) {
+            if (s.entity() == client.player || s.name().equalsIgnoreCase(myName)) continue;
+            if (whitelistedPlayers.contains(s.name().toLowerCase())) continue;
             total++;
-            if (!starRankOf(client, p).isEmpty()) hits++;
+            if (!starRankOf(s).isEmpty()) hits++;
         }
         staffSaneTotal = total;
         staffSaneHits  = hits;
@@ -3344,26 +3425,33 @@ public class Krypton implements ModInitializer {
                 + " §7andere=" + (staffStarOther ? "§aan" : "§caus")
                 + " §7Text=" + (staffTextRanks ? "§aan" : "§caus"));
         lines.add("");
-        List<PlayerEntity> snapshot = new ArrayList<>(client.world.getPlayers());
-        for (PlayerEntity p : snapshot) {
-            String name = p.getName().getString();
+        // Komplette Tab-Liste – nicht nur geladene Entities (sonst sieht man
+        // auf einem vollen Server nur sich selbst).
+        List<RankSources> snapshot = tabSources(client);
+        int loaded = 0;
+        for (RankSources s : snapshot) {
+            if (s.entity() != null) loaded++;
+            String name = s.name();
             boolean wl = whitelistedPlayers.contains(name.toLowerCase());
-            String rank = getPlayerRank(client, p);
-            int dist = (int) Math.round(Math.sqrt(client.player.squaredDistanceTo(p)));
-            lines.add("§f" + name + " §8| §7" + dist + "m"
+            String rank = rankOf(s);
+            String dist = s.entity() != null
+                    ? ((int) Math.round(Math.sqrt(client.player.squaredDistanceTo(s.entity()))) + "m")
+                    : "§8nur Tab";
+            lines.add("§f" + name + " §8| §7" + dist
                     + (wl ? " §a[Whitelist]" : "")
-                    + (p == client.player ? " §b[ich]" : "")
+                    + (s.entity() == client.player ? " §b[ich]" : "")
                     + " §8| " + (rank.isEmpty() ? "§7kein Staff" : "§cSTAFF: " + rank));
-            addStaffScanSource(lines, "Tab", getTabDisplayName(client, p));
-            try { addStaffScanSource(lines, "Name", p.getDisplayName()); } catch (Exception ignored) {}
-            net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+            addStaffScanSource(lines, "Tab", s.tab());
+            if (s.entityName() != null) addStaffScanSource(lines, "Name", s.entityName());
+            net.minecraft.scoreboard.Team team = s.team();
             if (team != null) {
                 try { addStaffScanSource(lines, "Team-Prefix", team.getPrefix()); } catch (Exception ignored) {}
                 try { addStaffScanSource(lines, "Team-Suffix", team.getSuffix()); } catch (Exception ignored) {}
             }
             lines.add("");
         }
-        if (snapshot.isEmpty()) lines.add("§7Keine Spieler in Sicht.");
+        lines.add(1, "§8" + snapshot.size() + " im Tab, " + loaded + " davon geladen");
+        if (snapshot.isEmpty()) lines.add("§7Keine Spieler im Tab.");
         return lines;
     }
 
@@ -3384,13 +3472,14 @@ public class Krypton implements ModInitializer {
         // key = codepoint<<24 | (Farbindex), einfacher: Map<String,int[]>
         java.util.LinkedHashMap<String, int[]> counts = new java.util.LinkedHashMap<>();
         java.util.LinkedHashMap<String, java.util.Set<String>> owners = new java.util.LinkedHashMap<>();
-        List<PlayerEntity> snapshot = new ArrayList<>(client.world.getPlayers());
-        for (PlayerEntity p : snapshot) {
+        // Komplette Tab-Liste – die Glyph-Statistik lebt von vielen Spielern.
+        List<RankSources> snapshot = tabSources(client);
+        for (RankSources p : snapshot) {
             java.util.Set<String> seen = new HashSet<>();
             List<int[]> g = new ArrayList<>();
-            collectGlyphs(getTabDisplayName(client, p), g, false);
-            try { collectGlyphs(p.getDisplayName(), g, false); } catch (Exception ignored) {}
-            net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+            collectGlyphs(p.tab(), g, false);
+            if (p.entityName() != null) collectGlyphs(p.entityName(), g, false);
+            net.minecraft.scoreboard.Team team = p.team();
             if (team != null) {
                 try { collectGlyphs(team.getPrefix(), g, false); } catch (Exception ignored) {}
                 try { collectGlyphs(team.getSuffix(), g, false); } catch (Exception ignored) {}
@@ -3400,11 +3489,11 @@ public class Krypton implements ModInitializer {
                 if (!seen.add(key)) continue;   // pro Spieler nur einmal zaehlen
                 counts.computeIfAbsent(key, k -> new int[]{ e[0], e[1], 0 })[2]++;
                 owners.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>())
-                      .add(p.getName().getString());
+                      .add(p.name());
             }
         }
         int players = Math.max(1, snapshot.size());
-        lines.add("§eGlyph-Übersicht §8– " + snapshot.size() + " Spieler sichtbar");
+        lines.add("§eGlyph-Übersicht §8– " + snapshot.size() + " Spieler im Tab");
         lines.add("§8Symbol, das fast jeder hat = Deko. Nur seltene Symbole sind Rang-Marker.");
         lines.add("");
         if (counts.isEmpty()) {
