@@ -133,7 +133,15 @@ public class Krypton implements ModInitializer {
         "authentication servers", "authentifizierungsserver", "auth servers",
         "not authenticated", "nicht authentifiziert", "bad login",
         "session expired", "sitzung abgelaufen", "session is invalid",
-        "already logged in", "bereits eingeloggt", "already online"
+        "already logged in", "bereits eingeloggt", "already online",
+        // Der Zusatz "(Try restarting your game and the launcher)" haengt bei
+        // Mojang an JEDER Session-/Auth-Meldung dran – egal wie der Rest lautet.
+        // Damit werden auch Formulierungen erwischt, die sonst durchrutschen.
+        // Bewusst NICHT nur "restart": ein "Server is restarting" darf hier
+        // nicht landen.
+        "restarting your game", "restart your game", "restarting the game",
+        "restart your launcher", "restarting your launcher", "restart the launcher",
+        "launcher neu", "spiel neu starten", "starte das spiel neu"
     };
     // Kategorie 2 – technische Abbrueche: Exceptions, Netty, Timeouts, Pakete.
     // Genau hier landen die "Java + lange Zahl"-Kicks.

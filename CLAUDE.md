@@ -747,9 +747,14 @@ reagiert wird, steuert `sessionFixMode`.
 | # | Name | Muster (Auszug) |
 |---|---|---|
 | **3** | `KEIN-REJOIN` | `banned`, `gebannt`, `tempban`, `kicked by`, `gekickt von`, `whitelist`, `outdated client`, `unsupported version`, `server is full`, `no permission` |
-| **1** | `SESSION` | `invalid session`, `failed to verify username`, `unverified_username`, `authentication servers`, `not authenticated`, `bad login`, `session expired`, `already logged in` |
+| **1** | `SESSION` | `invalid session`, `failed to verify username`, `unverified_username`, `authentication servers`, `not authenticated`, `bad login`, `session expired`, `already logged in`, **`restarting your game` / `restart your launcher`** |
 | **2** | `TECHNIK` | `internal exception`, `internal error`, `error id`, `io.netty`, `java.lang`, `java.io`, `java.net`, `exception`, `timed out`, `timeout`, `connection reset`, `forcibly closed`, `broken pipe`, `readerindex`, `out of bounds`, `keepalive`, `bad packet`, `decoder`, `nullpointer`, `socket`, `at net.minecraft` |
 | **0** | `SONSTIGES` | alles übrige |
+
+Der Zusatz *"(Try restarting your game and the launcher)"* hängt bei Mojang an
+**jeder** Session-/Auth-Meldung dran, egal wie der Rest formuliert ist — deshalb
+ist er als eigenes Muster drin. Bewusst **nicht** nur `restart`: ein
+"Server is restarting" darf nicht als Session-Fehler gelten (per Test abgesichert).
 
 Kategorie 3 wird **zuerst** geprüft: ein Ban-Text, in dem zufällig auch
 `exception` steht, darf niemals einen Reconnect auslösen.
