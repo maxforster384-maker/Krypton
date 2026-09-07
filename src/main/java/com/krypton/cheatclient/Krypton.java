@@ -161,10 +161,14 @@ public class Krypton implements ModInitializer {
         "banned", "gebannt", "permanently banned", "temporarily banned",
         "tempban", "permaban", "you are ban",
         "kicked by", "gekickt von", "kicked from the game by",
-        "whitelist", "not whitelisted",
         "outdated client", "outdated server", "unsupported version", "veraltete version",
-        "server is full", "der server ist voll", "server voll",
         "no permission", "keine berechtigung"
+        // BEWUSST NICHT hier: Whitelist und "Server voll".
+        // Beides ist voruebergehend. Der Wartungsmodus schaltet die Whitelist
+        // nach einer Weile wieder ab, und ein voller Server gibt irgendwann
+        // einen Slot frei. Beides faellt damit in Kategorie 0 (SONSTIGES) und
+        // wird vom normalen Auto-Reconnect endlos weiterprobiert – genau das,
+        // was man beim AFK-Warten auf einen Server will.
     };
 
     // --- DISCONNECT LOG ---
