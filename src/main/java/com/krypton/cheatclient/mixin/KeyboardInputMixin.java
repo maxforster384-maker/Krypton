@@ -24,6 +24,12 @@ public class KeyboardInputMixin {
 			// forward, backward, left, right, jump, sneak, sprint
 			boolean sneak = Krypton.shouldForceSneak();
 			input.playerInput = new net.minecraft.util.PlayerInput(false, false, false, false, false, sneak, false);
+			// UND den Bewegungsvektor: seit 1.21.2 berechnet KeyboardInput.tick() aus den Tasten
+			// zusaetzlich Input.movementVector (Vec2f) - DARAUS entsteht die Bewegung
+			// (LivingEntity.travel ueber getMovementInput), nicht aus playerInput. Ohne diese
+			// Zeile bekam der Koerper in der Freecam weiterhin WASD: ein Millimeter vor,
+			// Kollision, zurueck - jeden Tick, sichtbar fuer alle.
+			input.movementVector = new net.minecraft.util.math.Vec2f(0.0F, 0.0F);
 		}
 	}
 }
