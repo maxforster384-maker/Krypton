@@ -193,6 +193,17 @@ public class Krypton implements ModInitializer {
         "\u2605\u2606\u269D\u2726\u2727\u2729\u272A\u272B\u272C\u272D\u272E\u272F\u2730"
       + "\u2731\u2732\u2733\u2734\u2735\u2736\u2737\u2738\u2739\u273A\u273B\u273C\u273D"
       + "\u2742\u2743\u2749\u274A\u274B\u2B50";
+    // Zusaetzliche Glyphen aus krypton_staffglyphs.txt. Noetig, weil viele Server
+    // (u.a. DonutSMP) eigene Resourcepack-Symbole aus der Private Use Area
+    // (U+E000–U+F8FF) benutzen, die in keiner Unicode-Sternliste stehen.
+    public static final Set<Integer> extraStarGlyphs = new HashSet<>();
+    // Plausibilitaetsschalter: wird auf false gesetzt, sobald die Stern-Erkennung
+    // offensichtlich Unsinn liefert (mehr als die Haelfte aller sichtbaren Spieler
+    // waeren "Staff"). Dann zaehlt nur noch die Klartext-Erkennung – der Guard
+    // schaltet sich also NICHT wegen eines Deko-Symbols ab.
+    public static volatile boolean staffDetectSane = true;
+    private static int staffSaneTimer = 0;
+    public static int staffSaneTotal = 0, staffSaneHits = 0;
 
     // --- BONES FARMER ---
     public static boolean isBonesFarmerActive = false;
@@ -1094,6 +1105,7 @@ public class Krypton implements ModInitializer {
         loadDiscordConfig();
         loadSafetyLogout();
         loadStaffDetect();
+        loadStaffGlyphs();
         loadDisconnectLog();
 
         openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
@@ -1343,6 +1355,12 @@ public class Krypton implements ModInitializer {
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
                 return;
+            }
+
+            // --- STAFF-ERKENNUNG PLAUSIBILISIEREN ---
+            if (++staffSaneTimer >= 40) {
+                staffSaneTimer = 0;
+                updateStaffSanity(client);
             }
 
             // --- GUARD WATCHDOG ---
@@ -1864,6 +1882,9 @@ public class Krypton implements ModInitializer {
             if (isAutoReconnectActive) activeCheats.add("Reconnect: §aON");
             if (isSessionFixActive) activeCheats.add("Session Fix: §aON");
             if (wasSafetyLogout) activeCheats.add("§4Rejoin gesperrt (Notfall-Logout)");
+            // Sichtbare Warnung statt stillem Schutzverlust
+            if (!staffDetectSane && isAutoSpawnerActive)
+                activeCheats.add("§cStern-Erkennung unplausibel §8(" + staffSaneHits + "/" + staffSaneTotal + ") §7– nur Text");
 
             if (activeCheats.isEmpty()) return;
 
@@ -2891,6 +2912,40 @@ public class Krypton implements ModInitializer {
         };
     }
 
+    /** Gilt dieses Zeichen als Stern? Eingebaute Liste + eigene Glyphen. */
+    static boolean isStarGlyph(int cp) {
+        if (cp < 0x80) return false;                       // ASCII zaehlt nie
+        if (STAR_GLYPHS.indexOf(cp) >= 0) return true;
+        return extraStarGlyphs.contains(cp);
+    }
+
+    public static void loadStaffGlyphs() {
+        extraStarGlyphs.clear();
+        try {
+            File file = new File("krypton_staffglyphs.txt");
+            if (!file.exists()) return;
+            BufferedReader reader = new BufferedReader(new FileReader(file));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith("#")) continue;
+                if (t.toUpperCase().startsWith("U+")) t = t.substring(2);
+                try { extraStarGlyphs.add(Integer.parseInt(t, 16)); } catch (Exception ignored) {}
+            }
+            reader.close();
+        } catch (Exception e) {}
+    }
+
+    public static void saveStaffGlyphs() {
+        try {
+            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_staffglyphs.txt"));
+            writer.write("# Ein Codepoint pro Zeile, z.B. U+2605 oder E001"); writer.newLine();
+            writer.write("# Nur Glyphen eintragen, die WIRKLICH nur Staff hat!"); writer.newLine();
+            for (int cp : extraStarGlyphs) { writer.write(String.format("U+%04X", cp)); writer.newLine(); }
+            writer.close();
+        } catch (Exception e) {}
+    }
+
     /** RGB eines Legacy-§-Farbcodes, oder -1 wenn es kein Farbcode ist. */
     private static int legacyColorRgb(char code) {
         return switch (Character.toLowerCase(code)) {
@@ -2911,6 +2966,10 @@ public class Krypton implements ModInitializer {
      *   b) Legacy-§-Codes im Rohstring, inkl. BungeeCord-Hex (§x§R§R§G§G§B§B)
      */
     static void collectStars(Text text, List<int[]> out) {
+        collectGlyphs(text, out, true);
+    }
+
+    static void collectGlyphs(Text text, List<int[]> out, final boolean starsOnly) {
         if (text == null) return;
         try {
             text.visit(new net.minecraft.text.StringVisitable.StyledVisitor<Object>() {
@@ -2951,7 +3010,11 @@ public class Krypton implements ModInitializer {
                             i += 2;
                             continue;
                         }
-                        if (STAR_GLYPHS.indexOf(c) >= 0) out.add(new int[]{ c, cur });
+                        // starsOnly=false sammelt JEDES Sonderzeichen – so sieht man
+                        // im Staff-Scan auch Symbole, die noch in keiner Liste stehen.
+                        if (starsOnly ? isStarGlyph(c) : (c >= 0xA1 && c != 167)) {
+                            out.add(new int[]{ c, cur });
+                        }
                         i++;
                     }
                     return java.util.Optional.empty();
@@ -3019,8 +3082,8 @@ public class Krypton implements ModInitializer {
         return "";
     }
 
-    private static String getPlayerRank(MinecraftClient client, PlayerEntity p) {
-        // 1) Stern-Rank – Quellen einzeln pruefen und beim ersten Treffer raus.
+    /** Nur der Stern-Anteil der Erkennung, ohne Plausibilitaetspruefung. */
+    static String starRankOf(MinecraftClient client, PlayerEntity p) {
         String r = scanStarRank(getTabDisplayName(client, p));
         if (!r.isEmpty()) return r;
         try {
@@ -3032,6 +3095,44 @@ public class Krypton implements ModInitializer {
             try { r = scanStarRank(team.getPrefix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
             try { r = scanStarRank(team.getSuffix());      if (!r.isEmpty()) return r; } catch (Exception ignored) {}
             try { r = scanStarRank(team.getDisplayName()); if (!r.isEmpty()) return r; } catch (Exception ignored) {}
+        }
+        return "";
+    }
+
+    /**
+     * Plausibilitaetspruefung der Stern-Erkennung.
+     *
+     * Auf Servern wie DonutSMP hat JEDER Spieler ein farbiges Deko-Symbol im
+     * Tab-Prefix. Wuerde so ein Symbol faelschlich als Stern gezaehlt, waere
+     * plötzlich der halbe Server "Staff" – und der Guard wuerde sich abschalten,
+     * also genau dann NICHT schuetzen, wenn es drauf ankommt.
+     *
+     * Deshalb: sobald mehr als die Haelfte der sichtbaren Spieler als Staff
+     * gelten (bei mindestens 5 Spielern), wird die Stern-Erkennung als kaputt
+     * markiert und ignoriert. Es bleibt die Klartext-Erkennung, und im HUD steht
+     * eine Warnung. Lieber ein Fehlalarm im HUD als ein stillschweigend
+     * abgeschalteter Schutz.
+     */
+    private static void updateStaffSanity(MinecraftClient client) {
+        if (client.world == null || client.player == null) return;
+        int total = 0, hits = 0;
+        for (PlayerEntity p : new ArrayList<>(client.world.getPlayers())) {
+            if (p == client.player) continue;
+            if (whitelistedPlayers.contains(p.getName().getString().toLowerCase())) continue;
+            total++;
+            if (!starRankOf(client, p).isEmpty()) hits++;
+        }
+        staffSaneTotal = total;
+        staffSaneHits  = hits;
+        // Ab 5 Spielern aussagekraeftig; darunter bleibt die Erkennung an.
+        staffDetectSane = !(total >= 5 && hits * 2 > total);
+    }
+
+    private static String getPlayerRank(MinecraftClient client, PlayerEntity p) {
+        // 1) Stern-Rank – nur wenn die Erkennung plausibel ist.
+        if (staffDetectSane) {
+            String r = starRankOf(client, p);
+            if (!r.isEmpty()) return r;
         }
 
         // 2) Klartext-Fallback
@@ -3079,6 +3180,75 @@ public class Krypton implements ModInitializer {
             lines.add("");
         }
         if (snapshot.isEmpty()) lines.add("§7Keine Spieler in Sicht.");
+        return lines;
+    }
+
+    /**
+     * Glyph-Uebersicht: sammelt ALLE Sonderzeichen aus den Tab-/Team-Prefixes
+     * aller sichtbaren Spieler und zaehlt, wie viele Spieler sie haben.
+     *
+     * Das ist der entscheidende Diagnose-Schritt: ein Symbol, das fast jeder
+     * hat, ist Server-Deko und darf NIEMALS als Staff-Stern gelten. Ein Symbol,
+     * das nur ein oder zwei Spieler haben, ist der echte Rang-Marker.
+     */
+    static List<String> buildGlyphOverview(MinecraftClient client) {
+        List<String> lines = new ArrayList<>();
+        if (client.world == null || client.player == null) {
+            lines.add("§7Keine Welt geladen.");
+            return lines;
+        }
+        // key = codepoint<<24 | (Farbindex), einfacher: Map<String,int[]>
+        java.util.LinkedHashMap<String, int[]> counts = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, java.util.Set<String>> owners = new java.util.LinkedHashMap<>();
+        List<PlayerEntity> snapshot = new ArrayList<>(client.world.getPlayers());
+        for (PlayerEntity p : snapshot) {
+            java.util.Set<String> seen = new HashSet<>();
+            List<int[]> g = new ArrayList<>();
+            collectGlyphs(getTabDisplayName(client, p), g, false);
+            try { collectGlyphs(p.getDisplayName(), g, false); } catch (Exception ignored) {}
+            net.minecraft.scoreboard.Team team = p.getScoreboardTeam();
+            if (team != null) {
+                try { collectGlyphs(team.getPrefix(), g, false); } catch (Exception ignored) {}
+                try { collectGlyphs(team.getSuffix(), g, false); } catch (Exception ignored) {}
+            }
+            for (int[] e : g) {
+                String key = String.format("%04X|%06X", e[0], e[1] < 0 ? 0xFFFFFF : e[1]);
+                if (!seen.add(key)) continue;   // pro Spieler nur einmal zaehlen
+                counts.computeIfAbsent(key, k -> new int[]{ e[0], e[1], 0 })[2]++;
+                owners.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>())
+                      .add(p.getName().getString());
+            }
+        }
+        int players = Math.max(1, snapshot.size());
+        lines.add("§eGlyph-Übersicht §8– " + snapshot.size() + " Spieler sichtbar");
+        lines.add("§8Symbol, das fast jeder hat = Deko. Nur seltene Symbole sind Rang-Marker.");
+        lines.add("");
+        if (counts.isEmpty()) {
+            lines.add("§7Keine Sonderzeichen in den Prefixes gefunden.");
+            return lines;
+        }
+        List<int[]> sorted = new ArrayList<>(counts.values());
+        sorted.sort((a, b) -> b[2] - a[2]);
+        for (int[] e : sorted) {
+            int cp = e[0], rgb = e[1], n = e[2];
+            int fam = starColorFamily(rgb);
+            int pct = (int) Math.round(n * 100.0 / players);
+            String key = String.format("%04X|%06X", cp, rgb < 0 ? 0xFFFFFF : rgb);
+            String verdict;
+            if (isStarGlyph(cp) && starFamilyIsStaff(fam)) verdict = "§czählt als STAFF";
+            else if (isStarGlyph(cp))                      verdict = "§7Stern, Farbe zählt nicht";
+            else                                            verdict = "§8kein Stern";
+            String hint = pct >= 50 ? " §c<- DEKO!" : (n <= 2 ? " §a<- verdächtig selten" : "");
+            lines.add(String.format("§fU+%04X §8| %s §8| %s §8| §f%dx §8(%d%%) §8| %s%s",
+                    cp,
+                    rgb < 0 ? "#------" : String.format("#%06X", rgb),
+                    fam == 0 ? "unbestimmt" : starRankName(fam),
+                    n, pct, verdict, hint));
+            java.util.Set<String> who = owners.get(key);
+            if (who != null && who.size() <= 4) {
+                lines.add("   §8" + String.join(", ", who));
+            }
+        }
         return lines;
     }
 
@@ -3331,6 +3501,7 @@ public class Krypton implements ModInitializer {
         private final Screen parent;
         private List<String> lines = new ArrayList<>();
         private int page = 0;
+        private boolean glyphView = false;   // false = Spieler, true = Glyph-Übersicht
         private static final int PER_PAGE = 15;
 
         public StaffScanScreen(Screen parent) {
@@ -3339,7 +3510,7 @@ public class Krypton implements ModInitializer {
         }
 
         private void refresh() {
-            lines = buildStaffScanLines(client);
+            lines = glyphView ? buildGlyphOverview(client) : buildStaffScanLines(client);
             int maxPage = Math.max(0, (lines.size() - 1) / PER_PAGE);
             if (page > maxPage) page = maxPage;
         }
@@ -3372,6 +3543,13 @@ public class Krypton implements ModInitializer {
             famBtn("Text",   bx + 4*bw + 8, by, bw, () -> staffTextRanks,  () -> staffTextRanks  = !staffTextRanks);
 
             // Steuerzeile
+            addDrawableChild(ButtonWidget.builder(
+                Text.literal(glyphView ? "Ansicht: Glyphen" : "Ansicht: Spieler"), b -> {
+                    glyphView = !glyphView;
+                    page = 0;
+                    b.setMessage(Text.literal(glyphView ? "Ansicht: Glyphen" : "Ansicht: Spieler"));
+                    refresh();
+                }).dimensions(cX - 160, height - 80, 120, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("Aktualisieren"), b -> refresh())
                 .dimensions(cX - 160, height - 30, 90, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("<"), b -> { if (page > 0) page--; })
@@ -3388,7 +3566,8 @@ public class Krypton implements ModInitializer {
             super.render(c, mouseX, mouseY, delta);
 
             int maxPage = Math.max(0, (lines.size() - 1) / PER_PAGE);
-            String title = "§eStaff Scan §8– Seite " + (page + 1) + "/" + (maxPage + 1);
+            String title = "§eStaff Scan §8(" + (glyphView ? "Glyphen" : "Spieler")
+                         + ") §8– Seite " + (page + 1) + "/" + (maxPage + 1);
             c.drawCenteredTextWithShadow(textRenderer, Text.literal(title), width / 2, 8, 0xFFFFAA00);
 
             // Auf Breite skalieren, damit auch lange Diagnosezeilen lesbar bleiben

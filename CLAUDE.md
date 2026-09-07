@@ -673,6 +673,23 @@ Geprüfte Referenzwerte: `§a`=120°, `§2`=120°, `§9`=240°, `§1`=240°, `§
 `§3`=180°, `§d`=300°, `§5`=300°, `§c`=0°, `§6`=40°, `§e`=60°, `§f`/`§7`/`§8`
 fallen über die Sättigungsschwelle raus.
 
+**Plausibilitäts-Sicherung (`staffDetectSane`) — wichtig.** Auf Servern wie
+DonutSMP hat **jeder** Spieler ein farbiges Deko-Symbol im Tab-Prefix. Würde so
+ein Symbol fälschlich als Stern gezählt, wäre plötzlich der halbe Server "Staff"
+und der Guard würde sich abschalten — also genau dann nicht schützen, wenn es
+darauf ankommt. Deshalb prüft `updateStaffSanity()` alle 40 Ticks: gelten bei
+mindestens 5 sichtbaren Spielern **mehr als die Hälfte** als Staff, wird die
+Stern-Erkennung als kaputt markiert und ignoriert. Es bleibt die
+Klartext-Erkennung, und im HUD steht `§cStern-Erkennung unplausibel (n/m) – nur
+Text`. Lieber eine sichtbare Warnung als ein stillschweigend abgeschalteter
+Schutz.
+
+**Eigene Glyphen (`krypton_staffglyphs.txt`).** Viele Server benutzen
+Resourcepack-Symbole aus der **Private Use Area** (U+E000–U+F8FF), die in keiner
+Unicode-Sternliste stehen. Über die Datei lässt sich jeder Codepoint nachtragen
+(`U+E001` oder `E001` pro Zeile) — ohne Neubau. `isStarGlyph()` prüft die
+eingebaute Liste **und** diese Datei.
+
 **Erkannte Stern-Glyphen:** 32 Unicode-Sterne (`★ ☆ ⚝ ✦ ✧ ✩ ✪ ✫ ✬ ✭ ✮ ✯ ✰ ✱ ✲ ✳
 ✴ ✵ ✶ ✷ ✸ ✹ ✺ ✻ ✼ ✽ ❂ ❃ ❉ ❊ ❋ ⭐`), im Quelltext als Unicode-Escapes hinterlegt,
 damit die Erkennung nicht von der Dateikodierung abhängt.
@@ -905,7 +922,7 @@ C_DASH     0xFF3A4050   C_ROW_HOV  0x14FFFFFF
 | `WhitelistScreen` | Liste mit Hover-Highlight, Klick = entfernen; Textfeld + "+" |
 | `HoleSizeScreen` | Eigenes Fenster für `minHoleSize` (1–100), Alternative zur Inline-Eingabe |
 | `DisconnectLogScreen` | Letzte 20 Trenngründe (`disconnectHistory`) mit Uhrzeit, Kategorie und ausgeführter Aktion; skaliert auf Breite **und** Höhe. Buttons: "Modus" (schaltet `sessionFixMode` weiter), "Log löschen", "Zurück". `shouldPause()` = `false`. |
-| `StaffScanScreen` | **Rang-Diagnose.** Listet pro sichtbarem Spieler: Name, Distanz, Whitelist-Marker, Urteil (`STAFF: <Rang>` / `kein Staff`) und darunter je eine Zeile pro Quelle (Tab, Name, Team-Prefix, Team-Suffix) mit dem Rohtext (`§` → `&` sichtbar gemacht) und jedem gefundenen Stern als `U+XXXX #RRGGBB <Familie> [STAFF]/[egal]`. 15 Zeilen pro Seite, `<`/`>` blättert, "Aktualisieren" scannt neu. Fünf Schalter (Grün/Blau/Lila/Andere/Text) ändern die Erkennung sofort und speichern nach `krypton_staffdetect.txt`. `shouldPause()` = `false`. |
+| `StaffScanScreen` | **Rang-Diagnose, zwei Ansichten.** *Glyphen:* zählt jedes Sonderzeichen aus allen Tab-/Team-Prefixes über alle sichtbaren Spieler, sortiert nach Häufigkeit, mit Codepoint, Hex-Farbe, Familie, Trefferzahl/Prozent und Urteil. Ein Symbol bei ≥50 % ist markiert als `<- DEKO!`, eines bei ≤2 Spielern als `<- verdächtig selten` (plus deren Namen). Das ist der Weg, den echten Rang-Marker zu finden. *Spieler:* Listet pro sichtbarem Spieler: Name, Distanz, Whitelist-Marker, Urteil (`STAFF: <Rang>` / `kein Staff`) und darunter je eine Zeile pro Quelle (Tab, Name, Team-Prefix, Team-Suffix) mit dem Rohtext (`§` → `&` sichtbar gemacht) und jedem gefundenen Stern als `U+XXXX #RRGGBB <Familie> [STAFF]/[egal]`. 15 Zeilen pro Seite, `<`/`>` blättert, "Aktualisieren" scannt neu. Fünf Schalter (Grün/Blau/Lila/Andere/Text) ändern die Erkennung sofort und speichern nach `krypton_staffdetect.txt`. `shouldPause()` = `false`. |
 
 ---
 
@@ -929,6 +946,7 @@ Alle Dateien liegen im **Arbeitsverzeichnis** des Spiels (`run/` im Dev,
 | `krypton_bfdrop.txt` | `bonesFarmerDropBase` (1–99) | `loadDropBase` / `saveDropBase` |
 | `krypton_discord_id.txt` | letzte verarbeitete Discord-Message-ID | `loadDiscordConfig` / `saveLastDiscordMessageId` |
 | `krypton_safelogout.txt` | `wasSafetyLogout` (`true`/`false`) — Notfall-Logout-Sperre | `loadSafetyLogout` / `setSafetyLogout` |
+| `krypton_staffglyphs.txt` | zusätzliche Stern-Codepoints, einer pro Zeile (`U+E001`) | `loadStaffGlyphs` / `saveStaffGlyphs` |
 | `krypton_staffdetect.txt` | `green=`/`blue=`/`purple=`/`other=`/`text=` (je `true`/`false`) | `loadStaffDetect` / `saveStaffDetect` |
 | `krypton_disconnects.txt` | letzte 20 Trenngründe, eine Zeile pro Eintrag | `loadDisconnectLog` / `saveDisconnectLog` |
 
