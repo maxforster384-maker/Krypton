@@ -119,9 +119,11 @@ public class Krypton implements ModInitializer {
     // Multiplayer-Screen geoeffnet wird. Krypton verbindet nach einem Kick aber
     // direkt ueber ConnectScreen – der Check wuerde also nie laufen. Deshalb
     // wird bei Kategorie SESSION vorher kurz der Multiplayer-Screen gezeigt.
-    private static final int REAUTH_WINDOW_TICKS = 40;   // 2 Sekunden
+    // 5 s beim ersten Versuch, danach laenger – ein Token-Refresh ueber das
+    // Microsoft-Login kann je nach Verbindung ein paar Sekunden dauern.
+    private static final int REAUTH_WINDOW_TICKS = 100;  // 5 Sekunden
+    private static final int REAUTH_WINDOW_MAX   = 300;  // max. 15 Sekunden
     private static int reauthWindowTicks = 0;
-    private static boolean reauthWindowUsed = false;
     private static boolean pendingSessionReconnect = false;
 
     // Kategorie 1 – eindeutige Session-/Auth-Probleme.
@@ -1255,7 +1257,7 @@ public class Krypton implements ModInitializer {
                     if (wasSafetyLogout) setSafetyLogout(false);
                     sessionFixAttempts = 0;
                     pendingSessionReconnect = false;
-                    reauthWindowUsed = false;
+                    reauthWindowTicks = 0;
                 }
                 attemptIndex = 0;
                 reconnectTicks = -1;
@@ -1298,6 +1300,9 @@ public class Krypton implements ModInitializer {
                 Text hint        = null;
                 boolean autoBlocked = false;
                 String action;
+                // Pro Trennung neu entscheiden – ein alter Session-Kick darf das
+                // Re-Auth-Fenster nicht auf einen spaeteren Netty-Kick vererben.
+                pendingSessionReconnect = false;
 
                 if (wasSafetyLogout) {
                     // HARTE SPERRE. Nach dem Notfall-Logout wird NIE automatisch
@@ -1310,35 +1315,45 @@ public class Krypton implements ModInitializer {
                 } else if (lastServer == null) {
                     // Kein Server bekannt (z.B. direkt nach einem Client-Neustart).
                     action = "kein Server bekannt";
-                } else if (sessionFixApplies(cat)) {
+                } else if (sessionFixApplies(cat) && sessionFixAttempts < sessionFixMaxTries(cat)) {
                     int maxTries = sessionFixMaxTries(cat);
-                    if (sessionFixAttempts < maxTries) {
-                        sessionFixAttempts++;
-                        // Kurzer Delay: sowohl der Session-Aussetzer als auch ein
-                        // Netty-/Paketfehler sind beim nächsten Join meist weg.
-                        delay = 5;
-                        hint  = Text.literal("§eSession-Fix (" + disconnectCategoryName(cat) + ") §7– Versuch "
-                                             + sessionFixAttempts + "/" + maxTries);
-                        action = "Session-Fix " + sessionFixAttempts + "/" + maxTries;
-                        // Nur bei echten Session-Fehlern lohnt das Re-Auth-Fenster;
-                        // bei Netty-/Paketfehlern ist der Token ja in Ordnung.
-                        pendingSessionReconnect = (cat == 1);
-                    } else if (cat == 1) {
-                        // Mehr geht aus einem Mod heraus nicht: ein echtes Re-Auth
-                        // bräuchte den Microsoft-Refresh-Token des Launchers.
-                        hint = Text.literal("§cSession dauerhaft ungültig §7– Client neu starten (Re-Auth nötig).");
-                        action = "aufgegeben (Re-Auth nötig)";
-                    } else {
-                        hint = Text.literal("§c" + maxTries + " Versuche erfolglos §7– Server oder Verbindung prüfen.");
-                        action = "aufgegeben nach " + maxTries + " Versuchen";
-                    }
+                    sessionFixAttempts++;
+                    // Kurzer Delay: sowohl der Session-Aussetzer als auch ein
+                    // Netty-/Paketfehler sind beim nächsten Join meist weg.
+                    delay = 5;
+                    hint  = Text.literal("§eSession-Fix (" + disconnectCategoryName(cat) + ") §7– Versuch "
+                                         + sessionFixAttempts + "/" + maxTries);
+                    action = "Session-Fix " + sessionFixAttempts + "/" + maxTries;
+                    // Nur bei echten Session-Fehlern lohnt das Re-Auth-Fenster;
+                    // bei Netty-/Paketfehlern ist der Token ja in Ordnung.
+                    pendingSessionReconnect = (cat == 1);
                 } else if (isAutoReconnectActive) {
+                    // Auch wenn der Session-Fix aufgegeben hat, wird hier weiter
+                    // probiert. Genau das braucht man beim AFK-Stehen: der Client
+                    // soll von allein zurueckkommen, nicht auf einen Klick warten.
                     if (attemptIndex < reconnectDelays.size()) {
                         delay = reconnectDelays.get(attemptIndex);
                     } else if (isInfiniteReconnect && !reconnectDelays.isEmpty()) {
                         delay = reconnectDelays.get(reconnectDelays.size() - 1);
                     }
+                    boolean exhausted = sessionFixApplies(cat);
+                    if (exhausted && cat == 1) {
+                        // Weiterversuchen ja – aber der Hinweis bleibt: ohne
+                        // Re-Auth-Mod hilft am Ende nur ein Client-Neustart.
+                        hint = Text.literal("§cSession weiter ungültig §7– ggf. Client neu starten (Re-Auth).");
+                    } else if (exhausted) {
+                        hint = Text.literal("§c" + sessionFixMaxTries(cat) + " Session-Fix-Versuche erfolglos §7– weiter über Auto-Reconnect.");
+                    }
+                    // Bei einem echten Session-Fehler auch hier das Re-Auth-Fenster
+                    // geben, sonst laeuft der Auto-Reconnect ewig gegen denselben
+                    // toten Token.
+                    pendingSessionReconnect = (cat == 1);
                     action = delay != -1 ? ("Auto-Reconnect " + delay + "s") : "Reconnect-Liste erschöpft";
+                } else if (sessionFixApplies(cat)) {
+                    hint = cat == 1
+                        ? Text.literal("§cSession dauerhaft ungültig §7– Client neu starten (Re-Auth nötig).")
+                        : Text.literal("§c" + sessionFixMaxTries(cat) + " Versuche erfolglos §7– Server oder Verbindung prüfen.");
+                    action = "aufgegeben (Auto-Reconnect ist aus)";
                 } else {
                     action = "kein Reconnect aktiv";
                 }
@@ -1368,12 +1383,13 @@ public class Krypton implements ModInitializer {
                     reconnectTicks--;
                 } else if (reconnectTicks == 0) {
                     reconnectTicks = -1;
-                    if (pendingSessionReconnect && !reauthWindowUsed) {
-                        // Einmal pro Session-Kick: kurz den Multiplayer-Screen zeigen,
-                        // damit ein Re-Auth-Mod die Session erneuern kann. Danach erst
-                        // verbinden. Ohne Re-Auth-Mod kostet das nur 2 Sekunden.
-                        reauthWindowUsed = true;
-                        reauthWindowTicks = REAUTH_WINDOW_TICKS;
+                    if (pendingSessionReconnect) {
+                        // Multiplayer-Screen zeigen, damit ein Re-Auth-Mod die Session
+                        // erneuern kann – danach wird VON ALLEIN verbunden, ohne Klick.
+                        // Fenster waechst mit jedem Fehlversuch (5 s / 10 s / 15 s).
+                        pendingSessionReconnect = false;
+                        reauthWindowTicks = Math.min(REAUTH_WINDOW_MAX,
+                                REAUTH_WINDOW_TICKS * Math.max(1, sessionFixAttempts));
                         client.setScreen(new net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen(
                                 new net.minecraft.client.gui.screen.TitleScreen()));
                     } else {

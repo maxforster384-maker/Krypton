@@ -770,20 +770,30 @@ Reconnect nach **5 s** (plus dem üblichen ±15-Tick-Jitter).
 Versuchsgrenze: **3** bei Kategorie 1, **5** bei allen anderen — ein wirklich
 toter Access-Token erholt sich nicht, ein Netzwerkfehler schon.
 `sessionFixAttempts` wird nach 60 Ticks stabiler Verbindung zurückgesetzt.
-Ist die Grenze erreicht, kein Reconnect mehr, stattdessen
-`§cSession dauerhaft ungültig – Client neu starten (Re-Auth nötig).`
-(Kategorie 1) bzw. `§c<n> Versuche erfolglos – Server oder Verbindung prüfen.`
+Ist die Grenze erreicht, übernimmt der **normale Auto Reconnect** (falls aktiv)
+und probiert weiter — mit `Infinite` also endlos. Genau das braucht man beim
+AFK-Stehen. Der Hinweis bleibt sichtbar
+(`§cSession weiter ungültig – ggf. Client neu starten (Re-Auth).`).
+Ist Auto Reconnect aus, wird gestoppt und
+`§cSession dauerhaft ungültig – Client neu starten (Re-Auth nötig).` angezeigt.
 
 #### Re-Auth-Fenster (Zusammenspiel mit Re-Auth-Mods)
 
 Mods wie [Auto Reauth](https://modrinth.com/mod/auto-reauth) erneuern die Session
 genau dann, wenn der **Multiplayer-Screen** geöffnet wird. Krypton verbindet nach
 einem Kick aber direkt über `ConnectScreen` — der Check würde also nie laufen.
-Deshalb wird bei **Kategorie 1 (SESSION)** einmal pro Kick der Multiplayer-Screen
-für `REAUTH_WINDOW_TICKS` (40 Ticks = 2 s) gezeigt, bevor `doReconnect()` läuft
-(`pendingSessionReconnect` / `reauthWindowUsed`). Bei Kategorie 2 (TECHNIK)
-passiert das **nicht** — dort ist der Token ja in Ordnung.
-Ohne installierten Re-Auth-Mod kostet das nur die 2 Sekunden.
+Deshalb wird bei **Kategorie 1 (SESSION)** vor jedem Verbindungsversuch der
+Multiplayer-Screen gezeigt, bevor `doReconnect()` läuft
+(`pendingSessionReconnect`). Das Fenster wächst mit der Versuchszahl:
+`REAUTH_WINDOW_TICKS` (100 Ticks = 5 s) × Versuch, gedeckelt auf
+`REAUTH_WINDOW_MAX` (300 Ticks = 15 s) — ein Token-Refresh über das
+Microsoft-Login kann je nach Verbindung ein paar Sekunden dauern.
+Bei Kategorie 2 (TECHNIK) passiert das **nicht** — dort ist der Token ja in
+Ordnung. Ohne installierten Re-Auth-Mod kostet es nur diese Sekunden.
+
+**Alles läuft ohne Klick.** Countdown, Re-Auth-Fenster und Reconnect ticken von
+selbst weiter; der Knopf im `KryptonReconnectScreen` ist nur die Abkürzung. Das
+ist Absicht — der Client soll aus dem AFK-Betrieb allein zurückkommen.
 
 `doReconnect()` ist der **einzige** Verbindungspfad und steigt bei gesetztem
 `wasSafetyLogout` sofort aus — auch das Re-Auth-Fenster kann die Sperre nicht
