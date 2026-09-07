@@ -54,7 +54,6 @@ public class Krypton implements ModInitializer {
     // --- KEYBINDS ---
     private static KeyBinding openGuiKey;
     private static KeyBinding freecamKeyBinding;
-    private static KeyBinding bonesFarmerKeyBinding;
     public static int freecamKey = GLFW.GLFW_KEY_V;
     public static int lastSavedGuiKey = -1;
     private static boolean wasFreecamKeyPressed = false;
@@ -227,25 +226,6 @@ public class Krypton implements ModInitializer {
     private static int staffSaneTimer = 0;
     public static int staffSaneTotal = 0, staffSaneHits = 0;
 
-    // --- BONES FARMER ---
-    public static boolean isBonesFarmerActive = false;
-    public static int bonesFarmerHotkey = GLFW.GLFW_KEY_UNKNOWN;
-    public static int bonesFarmerDropBase = 28;
-    private static boolean wasBonesFarmerKeyPressed = false;
-    private static int bonesFarmerState = 0;
-    private static int bonesFarmerDelay = 0;
-    private static int bonesFarmerTimeout = 0;
-    private static int dropLootClicksTarget = 0;
-    private static int dropLootClicksDone = 0;
-    private static int bonesFarmerSpawnerIdx = 0;
-    private static int arrowsBeforeSpawner = 0;
-    private static BlockPos bonesFarmerTargetSpawner = null;
-    private static boolean bonesFarmerLoggedSlots = false;
-    private static int bonesFarmerEmptyCycles = 0;  // Loot-Zyklen ohne Bones
-    private static int bonesFarmerLastChestCount = -1; // Chest-Füllstand vorheriger Tick (Drop-Detection)
-    public static volatile boolean bonesFarmerDeliveryDone = false; // Chat-Signal: Order abgeschlossen
-    private static boolean bonesFarmerPickNewOrder = false;         // Nach Confirm → User wählt neue Order
-    private static int bonesFarmerDeliveryTimer = -1;              // -1 = inaktiv, 0+ = Ticks seit letzter Nachricht
 
     // --- AUTO SPAWNER ---
     private static boolean isMining = false;
@@ -259,12 +239,12 @@ public class Krypton implements ModInitializer {
     // --- SPAWNER-SCHUTZ HAERTUNG (Menue-Sperre, Auto-Sneak, Abbau-Garantie) ---
     // guardEngaged = Guard hat einen fremden Spieler erkannt und arbeitet gerade.
     // In dem Zustand hat der Notfall-Abbau absolute Prioritaet: Server-GUIs werden
-    // geschlossen, der Bones Farmer pausiert, und das Mining laeuft ueber unseren
+    // geschlossen, und das Mining laeuft ueber unseren
     // eigenen Raycast (unabhaengig von Screen, Cursor-Lock und Fensterfokus).
     public static volatile boolean guardEngaged = false;
     // >0 = Auto-Sneak kurz aussetzen. Noetig weil ein sneakender Spieler
     // serverseitig KEINE Block-GUI oeffnen kann (ServerPlayerInteractionManager
-    // prueft shouldCancelInteraction()). Der Bones Farmer und die Freecam
+    // prueft shouldCancelInteraction()). Die Freecam
     // melden ihre Rechtsklicks hier an.
     public static int sneakSuppressTicks = 0;
     private static boolean forcedSneakLastTick = false;
@@ -413,48 +393,6 @@ public class Krypton implements ModInitializer {
         } catch (Exception e) {}
     }
 
-    public static void loadBonesFarmerKey() {
-        try {
-            File file = new File("krypton_bfkey.txt");
-            if (file.exists()) {
-                BufferedReader reader = new BufferedReader(new FileReader(file));
-                String line = reader.readLine();
-                if (line != null && !line.trim().isEmpty()) bonesFarmerHotkey = Integer.parseInt(line.trim());
-                reader.close();
-            }
-        } catch (Exception e) {}
-    }
-
-    public static void saveBonesFarmerKey() {
-        try {
-            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_bfkey.txt"));
-            writer.write(String.valueOf(bonesFarmerHotkey));
-            writer.close();
-        } catch (Exception e) {}
-    }
-
-    public static void loadDropBase() {
-        try {
-            File file = new File("krypton_bfdrop.txt");
-            if (file.exists()) {
-                BufferedReader reader = new BufferedReader(new FileReader(file));
-                String line = reader.readLine();
-                if (line != null && !line.trim().isEmpty()) {
-                    int v = Integer.parseInt(line.trim());
-                    if (v >= 1 && v <= 99) bonesFarmerDropBase = v;
-                }
-                reader.close();
-            }
-        } catch (Exception e) {}
-    }
-
-    public static void saveDropBase() {
-        try {
-            BufferedWriter writer = new BufferedWriter(new FileWriter("krypton_bfdrop.txt"));
-            writer.write(String.valueOf(bonesFarmerDropBase));
-            writer.close();
-        } catch (Exception e) {}
-    }
 
     public static void loadGuiKey() {
         try {
@@ -868,7 +806,7 @@ public class Krypton implements ModInitializer {
      * Auto-Sneak. Notwendig, weil der Server bei einem sneakenden Spieler
      * KEINE Block-GUI öffnet (ServerPlayerInteractionManager prüft
      * shouldCancelInteraction() → also isSneaking()). Ohne diese Pause würde
-     * der Bones Farmer nie die Spawner-GUI aufbekommen bzw. – mit Block im
+     * man nie eine Block-GUI aufbekommen bzw. – mit Block im
      * Slot – sogar einen Block setzen.
      */
     public static void suppressSneak(int ticks) {
@@ -962,7 +900,7 @@ public class Krypton implements ModInitializer {
         if (screen instanceof net.minecraft.client.gui.screen.ingame.InventoryScreen) return true;
         if (screen instanceof net.minecraft.client.gui.screen.ingame.CreativeInventoryScreen) return true;
         // Alle anderen HandledScreens kommen vom Server (Spawner-GUI, Order,
-        // Bestätigung) – die braucht der Bones Farmer. Im Notfall schließt sie
+        // Bestätigung) – die bleiben offen. Im Notfall schließt sie
         // ensureGuardReady() sauber per closeHandledScreen().
         if (screen instanceof HandledScreen<?>) return false;
 
@@ -1262,8 +1200,6 @@ public class Krypton implements ModInitializer {
         loadFreecamSettings();
         loadLogs();
         loadCheatStates();
-        loadBonesFarmerKey();
-        loadDropBase();
         loadDiscordConfig();
         loadSafetyLogout();
         loadStaffDetect();
@@ -1282,12 +1218,6 @@ public class Krypton implements ModInitializer {
                 freecamKey,
                 KeyBinding.Category.MISC
         ));
-        bonesFarmerKeyBinding = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.krypton.bonesfarmer",
-                InputUtil.Type.KEYSYM,
-                bonesFarmerHotkey,
-                KeyBinding.Category.MISC
-        ));
 
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> saveCheatStates());
 
@@ -1298,26 +1228,6 @@ public class Krypton implements ModInitializer {
         // jedes Mal einen Tick ohne Sneak (STOP/START-Paketpaar).
         ClientTickEvents.START_CLIENT_TICK.register(Krypton::applyForceSneak);
 
-        // Chat-Listener: Delivery-Bestätigung erkennen ("delivered" / "bones" + "complete")
-        // CHAT-Kanal (Spieler-Nachrichten und Plugin-Broadcasts)
-        net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents.CHAT.register(
-            (message, signedMessage, sender, params, receptionTimestamp) -> {
-                if (!isBonesFarmerActive) return;
-                String text = message.getString().toLowerCase();
-                if (text.contains("deliver") || (text.contains("bones") && text.contains("complet"))) {
-                    bonesFarmerDeliveryDone = true;
-                }
-            });
-        // GAME-Kanal (System-/Plugin-Nachrichten ohne Signatur)
-        net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents.GAME.register(
-            (message, overlay) -> {
-                if (isBonesFarmerActive && !overlay) {
-                    String text = message.getString().toLowerCase();
-                    if (text.contains("deliver") || (text.contains("bones") && text.contains("complet"))) {
-                        bonesFarmerDeliveryDone = true;
-                    }
-                }
-            });
 
         AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
             if (isFreecamActive && !isManualInteraction) return ActionResult.FAIL;
@@ -1358,17 +1268,12 @@ public class Krypton implements ModInitializer {
                     }
                 }
             } catch (Exception e) {}
-            // Sync: freecamKey und bonesFarmerHotkey aus den registrierten KeyBindings lesen
+            // Sync: freecamKey aus den registrierten KeyBindings lesen
             // (falls User in vanilla Controls geändert hat)
             int fcCode = getBoundKeyCode(freecamKeyBinding);
             if (fcCode != GLFW.GLFW_KEY_UNKNOWN && fcCode != freecamKey) {
                 freecamKey = fcCode;
                 saveKeybind();
-            }
-            int bfCode = getBoundKeyCode(bonesFarmerKeyBinding);
-            if (bfCode != bonesFarmerHotkey) {
-                bonesFarmerHotkey = bfCode;
-                saveBonesFarmerKey();
             }
 
             // --- SERVER TRACKING FÜR RECONNECT ---
@@ -1601,11 +1506,6 @@ public class Krypton implements ModInitializer {
                 toggleFreecam(client);
             }
 
-            if (bonesFarmerKeyBinding.wasPressed() && client.currentScreen == null) {
-                isBonesFarmerActive = !isBonesFarmerActive;
-                bonesFarmerLoggedSlots = false;
-                if (!isBonesFarmerActive) { bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false; }
-            }
 
             if (isFreecamActive && client.player != null) {
 
@@ -1730,7 +1630,7 @@ public class Krypton implements ModInitializer {
                 }
             }
 
-            if (isSpawnerEspActive || isAutoSpawnerActive || isBonesFarmerActive || spawnerScriptActive) {
+            if (isSpawnerEspActive || isAutoSpawnerActive || spawnerScriptActive) {
                 // Rescan all loaded chunks every 20 ticks (1 second) for performance
                 spawnerScanTimer++;
                 if (spawnerScanTimer >= 20) {
@@ -1806,7 +1706,7 @@ public class Krypton implements ModInitializer {
                 BlockPos spawnerPos = enemyFound ? findReachableSpawner(client) : null;
 
                 // Notfall-Modus: ab hier hat der Abbau Vorrang vor allem anderen
-                // (Server-GUIs werden geschlossen, der Bones Farmer pausiert).
+                // (Server-GUIs werden geschlossen).
                 guardEngaged = enemyFound || hasMinedSpawner;
                 // Gegner da, aber nichts Abbaubares in Sicht und noch nichts
                 // abgebaut → der Guard ist wirkungslos. Sichtbar machen (HUD).
@@ -2057,7 +1957,6 @@ public class Krypton implements ModInitializer {
                 }
             }
 
-            tickBonesFarmer(client);
             tickSpawnerScript(client);
 
             if (isBedrockFinderActive) {
@@ -2094,7 +1993,6 @@ public class Krypton implements ModInitializer {
                         : (guardEngaged ? "§4EINSATZ" : "§eON");
                 activeCheats.add("Guard: " + guardState + " §8[Menüs gesperrt]");
             }
-            if (isBonesFarmerActive) activeCheats.add("Bones: §aON");
             if (isSpawnerEspActive) activeCheats.add("Spawner ESP: §dON");
             if (isAutoReconnectActive) activeCheats.add("Reconnect: §aON");
             if (isSessionFixActive) activeCheats.add("Session Fix: §aON");
@@ -2284,378 +2182,7 @@ public class Krypton implements ModInitializer {
 
     }
 
-    // ==========================================
-    // BONES FARMER
-    // ==========================================
 
-    private void tickBonesFarmer(MinecraftClient client) {
-        if (!isBonesFarmerActive || client.world == null || client.player == null) return;
-        if (isFreecamActive) return;
-        // Notfall des Spawner-Schutzes hat Vorrang: der Farmer würde sonst
-        // weiter in GUIs klicken, während der Guard abbauen und ausloggen will.
-        if (guardEngaged) {
-            if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-            bonesFarmerState = 0; bonesFarmerDelay = 5;
-            return;
-        }
-        if (isStaffNearby(client)) {
-            isBonesFarmerActive = false;
-            bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false;
-            if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-            return;
-        }
-        if (bonesFarmerDelay > 0) { bonesFarmerDelay--; return; }
-
-        switch (bonesFarmerState) {
-
-            // IDLE – warten bis kein Screen offen, dann starten
-            case 0:
-                if (client.currentScreen == null) { bonesFarmerState = 1; }
-                break;
-
-            // SPAWNER AUSWÄHLEN (immer derselbe gestackte Spawner)
-            case 1:
-                if (foundSpawners.isEmpty()) { bonesFarmerDelay = 20; break; }
-                // Nimm den nächsten Spawner in Reichweite
-                bonesFarmerTargetSpawner = null;
-                for (BlockPos pos : foundSpawners) {
-                    double dist = client.player.squaredDistanceTo(pos.getX()+0.5, pos.getY()+0.5, pos.getZ()+0.5);
-                    if (dist <= 25) { bonesFarmerTargetSpawner = pos; break; }
-                }
-                if (bonesFarmerTargetSpawner == null) { bonesFarmerDelay = 20; break; }
-                dropLootClicksTarget = Math.max(1, bonesFarmerDropBase - 2 + (int)(Math.random() * 5)); // base ± 2
-                dropLootClicksDone = 0;
-                bonesFarmerState = 2;
-                bonesFarmerDelay = 2 + (int)(Math.random() * 3);
-                break;
-
-            // SPAWNER ANVISIEREN – human-like Rotation mit Ruckeln
-            case 2:
-                if (bonesFarmerTargetSpawner == null) { bonesFarmerState = 1; break; }
-                if (client.currentScreen != null) {
-                    // Recovery: hängenden Screen schließen
-                    if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                    else client.setScreen(null);
-                    bonesFarmerDelay = 5;
-                    break;
-                }
-                double dx2 = bonesFarmerTargetSpawner.getX()+0.5 - client.player.getX();
-                double dy2 = bonesFarmerTargetSpawner.getY()+0.5 - client.player.getEyeY();
-                double dz2 = bonesFarmerTargetSpawner.getZ()+0.5 - client.player.getZ();
-                float tY = (float)Math.toDegrees(Math.atan2(dz2, dx2)) - 90f;
-                float tP = (float)-Math.toDegrees(Math.atan2(dy2, Math.sqrt(dx2*dx2+dz2*dz2)));
-                float sens2 = client.options.getMouseSensitivity().getValue().floatValue();
-                float f2 = sens2*0.6F+0.2F;
-                float gcd2 = f2*f2*f2*8.0F*0.15F;
-                float yD = MathHelper.wrapDegrees(tY - client.player.getYaw());
-                float pD = MathHelper.wrapDegrees(tP - client.player.getPitch());
-                // Variable Geschwindigkeit + zufälliges Ruckeln wie ein Mensch
-                float spd2 = 0.28f + (float)(Math.random()*0.22f);
-                float sy = MathHelper.clamp(yD*spd2, -22f, 22f);
-                float sp = MathHelper.clamp(pD*spd2, -22f, 22f);
-                // Micro-Jitter hinzufügen (sieht aus wie echte Maus)
-                sy += (float)(Math.random()-0.5) * gcd2 * 3f;
-                sp += (float)(Math.random()-0.5) * gcd2 * 3f;
-                sy -= sy%gcd2; sp -= sp%gcd2;
-                client.player.setYaw(client.player.getYaw()+sy);
-                client.player.setPitch(client.player.getPitch()+sp);
-                if (Math.abs(yD)<2.5f && Math.abs(pD)<2.5f) {
-                    bonesFarmerState=3; bonesFarmerDelay=(int)(Math.random()*2);
-                }
-                break;
-
-            // RECHTSKLICK AUF SPAWNER – echter Raycast (wie freecam)
-            case 3:
-                if (bonesFarmerTargetSpawner==null || client.interactionManager==null) { bonesFarmerState=1; break; }
-                // WICHTIG: Ein sneakender Spieler bekommt serverseitig KEINE
-                // Block-GUI (ServerPlayerInteractionManager prüft
-                // shouldCancelInteraction() → isSneaking()); mit einem Block in
-                // der Hand würde stattdessen sogar gesetzt werden. Läuft der
-                // Dauer-Sneak des Guards, wird er hier kurz abgemeldet und erst
-                // rechtsgeklickt, wenn der Sneak serverseitig wirklich aus ist.
-                // Nur relevant, solange der Guard scharf ist – ohne Guard sneakt
-                // hier niemand und der Farmer läuft unverändert weiter.
-                if (shouldForceSneak() || (isAutoSpawnerActive && !isSneakReleased(client))) {
-                    suppressSneak(8);
-                    bonesFarmerDelay = 2;
-                    break;
-                }
-                suppressSneak(8); // Fenster offen halten, bis die GUI da ist
-                Vec3d eye3 = client.player.getEyePos();
-                Vec3d dir3 = Vec3d.fromPolar(client.player.getPitch(), client.player.getYaw());
-                double reach3 = client.player.getBlockInteractionRange();
-                BlockHitResult rc3 = client.world.raycast(new RaycastContext(
-                    eye3, eye3.add(dir3.multiply(reach3+1.0)),
-                    RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, client.player));
-                if (rc3.getType()==HitResult.Type.BLOCK && rc3.getBlockPos().equals(bonesFarmerTargetSpawner)) {
-                    client.interactionManager.interactBlock(client.player, Hand.MAIN_HAND, rc3);
-                    client.player.swingHand(Hand.MAIN_HAND);
-                    bonesFarmerState=4; bonesFarmerDelay=3+(int)(Math.random()*4); bonesFarmerTimeout=40;
-                } else {
-                    // Raycast trifft Spawner noch nicht → nochmal drehen
-                    bonesFarmerState=2;
-                }
-                break;
-
-            // WARTEN BIS SPAWNER-GUI OFFEN
-            case 4:
-                if (client.currentScreen instanceof HandledScreen<?> hs4) {
-                    bonesFarmerLoggedSlots = true; // kein Chat-Debug mehr
-                    int cs4 = hs4.getScreenHandler().slots.size() - 36;
-                    // Drop-Button suchen: Item-Typ (Dispenser/Dropper) ODER Text "drop" in Action-Reihe
-                    int s4 = findDropButton(hs4, cs4 - 9, cs4);
-                    if (s4 >= 0) {
-                        bonesFarmerState = 5;
-                        bonesFarmerDelay = 1 + (int)(Math.random()*2);
-                    } else if (--bonesFarmerTimeout <= 0) {
-                        client.player.closeHandledScreen();
-                        bonesFarmerState = 1;
-                        bonesFarmerDelay = 30;
-                    }
-                } else if (--bonesFarmerTimeout <= 0) {
-                    bonesFarmerState = 1; bonesFarmerDelay = 10;
-                }
-                break;
-
-            // DROP LOOT KLICKEN – Arrow-Detection direkt in der GUI
-            case 5:
-                if (!(client.currentScreen instanceof HandledScreen<?> hs5)) { bonesFarmerState=10; break; }
-                if (hasArrowInSpawnerGui(hs5)) { bonesFarmerState=10; break; }
-                {
-                    int cs5 = hs5.getScreenHandler().slots.size() - 36;
-                    int dropSlot = findDropButton(hs5, cs5 - 9, cs5);
-                    if (dropSlot < 0) { bonesFarmerState = 10; break; }
-                    client.player.setYaw(client.player.getYaw() + (float)(Math.random()-0.5)*0.18f);
-                    client.player.setPitch(client.player.getPitch() + (float)(Math.random()-0.5)*0.12f);
-                    client.interactionManager.clickSlot(hs5.getScreenHandler().syncId, dropSlot, 0, SlotActionType.PICKUP, client.player);
-                    dropLootClicksDone++;
-                    bonesFarmerState = dropLootClicksDone>=dropLootClicksTarget ? 10 : 7;
-                    bonesFarmerDelay = 4 + (int)(Math.random()*5); // 4-8 Ticks (200-400 ms) – menschliches Klicktempo
-                }
-                break;
-
-            // NEXT KLICKEN
-            case 7:
-                if (!(client.currentScreen instanceof HandledScreen<?> hs7)) { bonesFarmerState=10; break; }
-                {
-                    int cs7 = hs7.getScreenHandler().slots.size() - 36;
-                    int nextSlot = findNextButton(hs7, cs7 - 9, cs7);
-                    if (nextSlot >= 0) {
-                        client.player.setYaw(client.player.getYaw() + (float)(Math.random()-0.5)*0.15f);
-                        client.player.setPitch(client.player.getPitch() + (float)(Math.random()-0.5)*0.1f);
-                        client.interactionManager.clickSlot(hs7.getScreenHandler().syncId, nextSlot, 0, SlotActionType.PICKUP, client.player);
-                    }
-                }
-                bonesFarmerState=5; bonesFarmerDelay=4+(int)(Math.random()*5); // 4-8 Ticks – menschliches Klicktempo
-                break;
-
-            // ESC – SPAWNER-GUI SCHLIESSEN → dann /order bones
-            case 10:
-                if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                bonesFarmerState=20; bonesFarmerDelay=5+(int)(Math.random()*8);
-                break;
-
-            // /order bones SENDEN
-            case 20:
-                if (client.currentScreen!=null) break;
-                if (countBonesInInventory(client)==0) {
-                    // Kein Bone im Inv nach Loot-Zyklus
-                    bonesFarmerEmptyCycles++;
-                    if (bonesFarmerEmptyCycles >= 2) {
-                        // 2× hintereinander nichts gefunden → Bot ausschalten
-                        isBonesFarmerActive = false;
-                        bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerEmptyCycles = 0;
-                        break;
-                    }
-                    bonesFarmerState=27; bonesFarmerDelay=3; break;
-                }
-                bonesFarmerEmptyCycles = 0; // Bones vorhanden → Counter resetten
-                client.getNetworkHandler().sendChatCommand("order bones");
-                bonesFarmerState=21; bonesFarmerDelay=10+(int)(Math.random()*10); bonesFarmerTimeout=400;
-                break;
-
-            // WARTEN BIS "Deliver Items" GUI OFFEN (user klickt order an)
-            case 21:
-                if (client.currentScreen instanceof HandledScreen<?> hs21 &&
-                        hs21.getTitle().getString().toLowerCase().contains("deliver")) {
-                    arrowsBeforeSpawner = -1; bonesFarmerTimeout = 0; bonesFarmerLastChestCount = -1;
-                    bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false;
-                    bonesFarmerState=22; bonesFarmerDelay=2;
-                } else if (--bonesFarmerTimeout<=0) {
-                    bonesFarmerState=1;
-                }
-                break;
-
-            // BONES REINLEGEN
-            // – bis zu 4 verschiedene Bone-Slots pro Tick
-            // – DROP-DETECTION: Inv nimmt ab aber Chest wächst nicht → Items fallen → sofort ESC+neue Order
-            // – User ESCt selbst → zurück zu State 21 (neue Order wählen)
-            case 22:
-                // Neue deliver-Nachricht → Timer (zurück) auf 0 setzen (ab jetzt zählen)
-                if (bonesFarmerDeliveryDone) {
-                    bonesFarmerDeliveryDone = false;
-                    bonesFarmerDeliveryTimer = -1;
-                }
-                // Timer aktiv (>= 0): hochzählen. Bei 100 Ticks (5 Sek) keine neue Nachricht → Order voll
-                if (bonesFarmerDeliveryTimer >= 0) {
-                    if (++bonesFarmerDeliveryTimer >= 100) {
-                        bonesFarmerPickNewOrder = true;
-                        bonesFarmerLastChestCount = -1;
-                        bonesFarmerDeliveryTimer = -1;
-                        bonesFarmerState = 23; bonesFarmerDelay = 2; break;
-                    }
-                    // Noch nicht 5 Sek → weiter Bones liefern (kein break!)
-                }
-                if (!(client.currentScreen instanceof HandledScreen<?> hs22)
-                        || !hs22.getTitle().getString().toLowerCase().contains("deliver")) {
-                    // Kein Delivery-Screen (leer oder Order-Liste) → User wählt neue Order
-                    bonesFarmerLastChestCount = -1; bonesFarmerTimeout = 400;
-                    bonesFarmerDeliveryTimer = -1;
-                    bonesFarmerState = 21; bonesFarmerDelay = 3;
-                    break;
-                }
-                {
-                    int bonesNow = countBonesInInventory(client);
-                    if (bonesNow == 0) { bonesFarmerState=23; bonesFarmerDelay=2; break; }
-
-                    ScreenHandler sh22 = hs22.getScreenHandler();
-                    int ps22 = sh22.slots.size() - 36;
-
-                    // Chest-Füllstand zählen (belegte Slots)
-                    int chestCount = 0;
-                    for (int i = 0; i < ps22; i++) {
-                        if (sh22.slots.get(i).hasStack()) chestCount++;
-                    }
-
-                    // Chest komplett voll → ESC und confirmen
-                    if (chestCount >= ps22) { bonesFarmerState=23; bonesFarmerDelay=2; break; }
-
-                    // DROP-DETECTION: Inv abgenommen UND Chest nicht voller geworden
-                    // → Items landen auf dem Boden (Order voll/abgelaufen) → neue Order wählen
-                    if (arrowsBeforeSpawner >= 0 && bonesFarmerLastChestCount >= 0) {
-                        boolean invDecreased  = bonesNow < arrowsBeforeSpawner;
-                        boolean chestNotGrown = chestCount <= bonesFarmerLastChestCount;
-                        if (invDecreased && chestNotGrown) {
-                            // Items fallen auf den Boden (Order voll) → was drin ist noch confirmen, dann neue Order
-                            bonesFarmerPickNewOrder = true;
-                            bonesFarmerLastChestCount = -1;
-                            bonesFarmerState = 23; bonesFarmerDelay = 2; break;
-                        }
-                    }
-
-                    // Stall-Detection: 10 Ticks kein Fortschritt → ESC
-                    if (arrowsBeforeSpawner >= 0 && bonesNow >= arrowsBeforeSpawner) {
-                        if (++bonesFarmerTimeout >= 10) { bonesFarmerState=23; bonesFarmerDelay=2; break; }
-                    } else {
-                        bonesFarmerTimeout = 0;
-                    }
-                    arrowsBeforeSpawner = bonesNow;
-                    bonesFarmerLastChestCount = chestCount;
-
-                    // EIN Bone-Slot pro Durchlauf, danach 1 Tick Pause (~10 Klicks/s).
-                    // Vorher: 4 Shift-Klicks im selben Tick = 80 Klicks/s – das
-                    // schafft kein Mensch und fällt bei Klickraten-Checks sofort auf.
-                    int clicked = 0;
-                    for (int i = ps22; i < sh22.slots.size() && clicked < 1; i++) {
-                        Slot s22 = sh22.slots.get(i);
-                        if (s22.hasStack() && s22.getStack().isOf(Items.BONE)) {
-                            if (clicked == 0) snapCursorToSlot(client, hs22, i);
-                            client.interactionManager.clickSlot(sh22.syncId, i, 0, SlotActionType.QUICK_MOVE, client.player);
-                            clicked++;
-                        }
-                    }
-                    if (clicked == 0) { bonesFarmerState=23; bonesFarmerDelay=2; }
-                    else bonesFarmerDelay = 1;  // Delivery-/Stall-Timer zählen damit halb so schnell (5 s → ~10 s) – gewollt
-                }
-                break;
-
-            // ESC – DELIVERY GUI SCHLIESSEN (Server öffnet Confirm)
-            case 23:
-                if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                bonesFarmerState=24; bonesFarmerDelay=3+(int)(Math.random()*4); bonesFarmerTimeout=100;
-                break;
-
-            // WARTEN BIS CONFIRM-SCREEN OFFEN
-            case 24:
-                if (client.currentScreen instanceof HandledScreen<?> hs24) {
-                    String t24 = hs24.getTitle().getString().toLowerCase();
-                    if (t24.contains("confirm") || t24.contains("bestätig")) {
-                        bonesFarmerState=25; bonesFarmerDelay=2+(int)(Math.random()*3);
-                    } else if (--bonesFarmerTimeout<=0) {
-                        // Kein Confirm → trotzdem fortfahren
-                        bonesFarmerState=26;
-                    }
-                } else if (--bonesFarmerTimeout<=0) {
-                    bonesFarmerState=26;
-                }
-                break;
-
-            // CONFIRM KLICKEN (grüne Glasscheibe ODER "confirm"-Text)
-            case 25:
-                if (!(client.currentScreen instanceof HandledScreen<?> hs25)) { bonesFarmerState=26; break; }
-                {
-                    ScreenHandler sh25 = hs25.getScreenHandler();
-                    int cs25 = sh25.slots.size() - 36;
-                    int confirmSlot = -1;
-                    // 1) Zuerst: grüne Glasscheibe (Lime oder Green)
-                    for (int i = 0; i < cs25; i++) {
-                        Slot sl = sh25.slots.get(i);
-                        if (sl.hasStack() && (sl.getStack().isOf(Items.LIME_STAINED_GLASS_PANE)
-                                || sl.getStack().isOf(Items.GREEN_STAINED_GLASS_PANE))) {
-                            confirmSlot = i; break;
-                        }
-                    }
-                    // 2) Fallback: Text "confirm"
-                    if (confirmSlot < 0) confirmSlot = findSlotByName(hs25, "confirm");
-                    if (confirmSlot >= 0)
-                        client.interactionManager.clickSlot(sh25.syncId, confirmSlot, 0, SlotActionType.PICKUP, client.player);
-                    else
-                        client.player.closeHandledScreen();
-                }
-                bonesFarmerState=26; bonesFarmerDelay=5+(int)(Math.random()*8);
-                break;
-
-            // NACH CONFIRM
-            case 26:
-                // "deliver"-Nachricht war der Auslöser → User wählt neue Order selbst
-                if (bonesFarmerPickNewOrder) {
-                    bonesFarmerPickNewOrder = false;
-                    bonesFarmerLastChestCount = -1; bonesFarmerTimeout = 600; // 30s Wartezeit
-                    // Order-Liste (falls noch offen) NICHT schließen – User braucht sie zum Auswählen
-                    bonesFarmerState = 21; bonesFarmerDelay = 3; break;
-                }
-                if (client.currentScreen instanceof HandledScreen<?> hs26) {
-                    String t26 = hs26.getTitle().getString().toLowerCase();
-                    if (t26.contains("deliver")) {
-                        arrowsBeforeSpawner = -1; bonesFarmerTimeout = 0; bonesFarmerLastChestCount = -1;
-                        bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false;
-                        bonesFarmerState=22; bonesFarmerDelay=1; break;
-                    }
-                    // Anderes Menü (Order-Liste) → ESC
-                    client.player.closeHandledScreen();
-                    bonesFarmerDelay=3; break;
-                }
-                if (countBonesInInventory(client) > 0) {
-                    bonesFarmerState=20; bonesFarmerDelay=8+(int)(Math.random()*10);
-                } else {
-                    bonesFarmerState=27; bonesFarmerDelay=3;
-                }
-                break;
-
-            // DOPPEL-ESC + zurück zum Spawner
-            case 27:
-                if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                else if (client.currentScreen != null) client.setScreen(null);
-                bonesFarmerState=28; bonesFarmerDelay=3+(int)(Math.random()*3);
-                break;
-            case 28:
-                if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                else if (client.currentScreen != null) client.setScreen(null);
-                dropLootClicksDone=0;
-                bonesFarmerState=2; bonesFarmerDelay=4+(int)(Math.random()*4);
-                break;
-        }
-    }
 
     // ==========================================
     // SPAWNER SCRIPT (Discord-gesteuert)
@@ -2908,171 +2435,6 @@ public class Krypton implements ModInitializer {
         }
     }
 
-    // Prüft ob in den Spawner-GUI-Slots (nicht Spieler-Inv) ein Arrow liegt.
-    // Nur Slots 0-44 (Loot-Content, Reihen 1-5) – Reihe 6 (Slots 45-53) enthält
-    // den NEXT-Button (ein Arrow-Item) und darf NICHT mitgezählt werden.
-    private static boolean hasArrowInSpawnerGui(HandledScreen<?> screen) {
-        ScreenHandler handler = screen.getScreenHandler();
-        int checkSlots = Math.min(45, handler.slots.size() - 36);
-        for (int i = 0; i < checkSlots; i++) {
-            Slot slot = handler.slots.get(i);
-            if (!slot.hasStack()) continue;
-            if (slot.getStack().isOf(Items.ARROW)) return true;
-            if (itemTextContains(slot.getStack(), "arrow")) return true;
-        }
-        return false;
-    }
-
-    private static int countBonesInInventory(MinecraftClient client) {
-        if (client.player==null) return 0;
-        int n=0;
-        for (int i=0; i<client.player.getInventory().size(); i++) {
-            ItemStack s=client.player.getInventory().getStack(i);
-            if (s.isOf(Items.BONE)) n+=s.getCount();
-        }
-        return n;
-    }
-
-    private static int findSlotByName(HandledScreen<?> screen, String nameContains) {
-        ScreenHandler handler = screen.getScreenHandler();
-        String lower = nameContains.toLowerCase();
-        for (int i = 0; i < handler.slots.size(); i++) {
-            Slot slot = handler.slots.get(i);
-            if (slot.hasStack() && itemTextContains(slot.getStack(), lower)) return i;
-        }
-        return -1;
-    }
-
-    // Sucht nur im Bereich [startSlot, endSlot) – für Action-Button-Reihen
-    private static int findSlotInRange(HandledScreen<?> screen, String nameContains, int startSlot, int endSlot) {
-        ScreenHandler handler = screen.getScreenHandler();
-        String lower = nameContains.toLowerCase();
-        int end = Math.min(endSlot, handler.slots.size());
-        for (int i = Math.max(0, startSlot); i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (slot.hasStack() && itemTextContains(slot.getStack(), lower)) return i;
-        }
-        return -1;
-    }
-
-    // DROP-Button: zuerst nach Item-Typ (Dispenser/Dropper Block) suchen, dann Text "drop"
-    private static int findDropButton(HandledScreen<?> screen, int startSlot, int endSlot) {
-        ScreenHandler handler = screen.getScreenHandler();
-        int end = Math.min(endSlot, handler.slots.size());
-        int start = Math.max(0, startSlot);
-        // 1) Item-Typ: Dispenser oder Dropper
-        for (int i = start; i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (!slot.hasStack()) continue;
-            ItemStack st = slot.getStack();
-            if (st.isOf(Items.DISPENSER) || st.isOf(Items.DROPPER)) return i;
-        }
-        // 2) Text-Fallback
-        for (int i = start; i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (slot.hasStack() && itemTextContains(slot.getStack(), "drop")) return i;
-        }
-        return -1;
-    }
-
-    // NEXT-Button: rechter Pfeil (nicht den linken BACK-Pfeil erwischen)
-    private static int findNextButton(HandledScreen<?> screen, int startSlot, int endSlot) {
-        ScreenHandler handler = screen.getScreenHandler();
-        int end = Math.min(endSlot, handler.slots.size());
-        int start = Math.max(0, startSlot);
-        // 1) Arrow-Item MIT "next"/"forward"/"right" im Text → sicherste Wahl
-        for (int i = start; i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (!slot.hasStack() || !slot.getStack().isOf(Items.ARROW)) continue;
-            if (itemTextContains(slot.getStack(), "next")
-                    || itemTextContains(slot.getStack(), "forward")
-                    || itemTextContains(slot.getStack(), "right")) return i;
-        }
-        // 2) Arrow-Item das NICHT "back"/"prev"/"left" im Text hat
-        for (int i = start; i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (!slot.hasStack() || !slot.getStack().isOf(Items.ARROW)) continue;
-            if (!itemTextContains(slot.getStack(), "back")
-                    && !itemTextContains(slot.getStack(), "prev")
-                    && !itemTextContains(slot.getStack(), "left")) return i;
-        }
-        // 3) Text-Fallback "next"
-        for (int i = start; i < end; i++) {
-            Slot slot = handler.slots.get(i);
-            if (slot.hasStack() && itemTextContains(slot.getStack(), "next")) return i;
-        }
-        return -1;
-    }
-
-    // Bewegt den echten Maus-Cursor zum Slot (GUI-Position → Window-Pixel)
-    // Damit sieht das Shift-Click aus wie echter Mauszeiger der auf dem Item ist
-    private static void snapCursorToSlot(MinecraftClient client, HandledScreen<?> screen, int slotIdx) {
-        try {
-            ScreenHandler handler = screen.getScreenHandler();
-            if (slotIdx < 0 || slotIdx >= handler.slots.size()) return;
-            Slot slot = handler.slots.get(slotIdx);
-            // GUI-Offset des HandledScreen via Reflection (Yarn: "x" / "y")
-            int guiLeft = 0, guiTop = 0;
-            for (java.lang.reflect.Field f : HandledScreen.class.getDeclaredFields()) {
-                f.setAccessible(true);
-                if ("x".equals(f.getName()) && f.getType() == int.class) guiLeft = (int) f.get(screen);
-                if ("y".equals(f.getName()) && f.getType() == int.class) guiTop  = (int) f.get(screen);
-            }
-            // Slot-Mitte + kleiner zufälliger Jitter (±3px) für Natürlichkeit
-            double gx = guiLeft + slot.x + 8 + (Math.random() - 0.5) * 6;
-            double gy = guiTop  + slot.y + 8 + (Math.random() - 0.5) * 6;
-            double scale = client.getWindow().getScaleFactor();
-            GLFW.glfwSetCursorPos(client.getWindow().getHandle(), gx * scale, gy * scale);
-        } catch (Exception ignored) {}
-    }
-
-    // Sucht in Name + CustomName + Lore (alles entfärbt) nach einem Substring
-    private static boolean itemTextContains(ItemStack stack, String lowerSearch) {
-        if (stack == null || stack.isEmpty()) return false;
-        // Item-Name (Display Name)
-        try {
-            String s = stack.getName().getString().replaceAll("§[0-9a-fk-orA-FK-OR]", "").toLowerCase();
-            if (s.contains(lowerSearch)) return true;
-        } catch (Exception ignored) {}
-        // Custom-Name Komponente
-        try {
-            net.minecraft.text.Text cn = stack.get(net.minecraft.component.DataComponentTypes.CUSTOM_NAME);
-            if (cn != null) {
-                String s = cn.getString().replaceAll("§[0-9a-fk-orA-FK-OR]", "").toLowerCase();
-                if (s.contains(lowerSearch)) return true;
-            }
-        } catch (Exception ignored) {}
-        // Lore (Beschreibungs-Zeilen)
-        try {
-            net.minecraft.component.type.LoreComponent lore = stack.get(net.minecraft.component.DataComponentTypes.LORE);
-            if (lore != null) {
-                for (net.minecraft.text.Text line : lore.lines()) {
-                    String s = line.getString().replaceAll("§[0-9a-fk-orA-FK-OR]", "").toLowerCase();
-                    if (s.contains(lowerSearch)) return true;
-                }
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    // Debug: schreibt alle Slot-Inhalte einer GUI in den lokalen Chat
-    private static void debugLogSlots(MinecraftClient client, HandledScreen<?> screen, String label) {
-        if (client.player == null) return;
-        ScreenHandler handler = screen.getScreenHandler();
-        int chest = handler.slots.size() - 36;
-        client.player.sendMessage(Text.literal("§6[Bones] " + label + " (" + chest + " GUI-Slots):"), false);
-        for (int i = 0; i < chest; i++) {
-            Slot slot = handler.slots.get(i);
-            if (!slot.hasStack()) continue;
-            String name = slot.getStack().getName().getString();
-            String loreFirst = "";
-            try {
-                net.minecraft.component.type.LoreComponent lc = slot.getStack().get(net.minecraft.component.DataComponentTypes.LORE);
-                if (lc != null && !lc.lines().isEmpty()) loreFirst = " / " + lc.lines().get(0).getString();
-            } catch (Exception ignored) {}
-            client.player.sendMessage(Text.literal("§7[" + i + "] §f" + name + "§8" + loreFirst), false);
-        }
-    }
 
     // ==========================================
     // STAFF-ERKENNUNG
@@ -4135,11 +3497,8 @@ public class Krypton implements ModInitializer {
         // ── Animations ──────────────────────────────────────────────────────
         private float   openAnim              = 0f;
         private boolean isRebindingFreecam    = false;
-        private boolean isRebindingBonesFarmer = false;
         private boolean isEnteringHoleSize  = false;
         private String  holeSizeInput       = "";
-        private boolean isEnteringDropCount = false;
-        private String  dropCountInput      = "";
         private boolean wasMouseDown        = false;
         private final float[] dotAnim      = new float[24]; // per-module 0→1
 
@@ -4170,8 +3529,8 @@ public class Krypton implements ModInitializer {
         // idx 0=Freecam  1=AutoSpawner  2=AutoReconnect  3=DisableOnDmg
         //     4=BedrockFinder  5=PlayerESP  6=SpawnerESP  7=Fullbright
         //     8=PlayerLogs(screen)  9=LogoutLogs(screen)  10=FreecamKey(rebind)
-        //     11=ReconnectCfg(screen)  12=HoleSize(input)  13=BonesFarm(toggle)
-        //     14=BonesKey(rebind)  15=BonesDropBase(input)  16=Tracers(toggle)
+        //     11=ReconnectCfg(screen)  12=HoleSize(input)  13=entfernt
+        //     14,15=entfernt  16=Tracers(toggle)
         //     17=Whitelist(screen)  18=SessionFix(toggle)  19=StaffScan(screen)
         //     20=SessionTest(action) 21=RejoinLock(toggle) 22=DisconnectLog(screen)
         //     23=SessionMode(cycle)
@@ -4184,8 +3543,8 @@ public class Krypton implements ModInitializer {
             { 4, 12 },
             //  RENDER: PlayerESP, Tracers, SpawnerESP, Fullbright
             { 5, 16, 6, 7 },
-            //  CLIENT: AutoSpawner, AutoReconnect, SessionFix, ReconnectSet, Whitelist, PlayerLogs, LogoutLogs, BonesFarm, BonesKey, BonesDropBase
-            { 1, 2, 18, 23, 11, 17, 8, 9, 13, 14, 15 }
+            //  CLIENT: AutoSpawner, AutoReconnect, SessionFix, ReconnectSet, Whitelist, PlayerLogs, LogoutLogs
+            { 1, 2, 18, 23, 11, 17, 8, 9 }
         };
         private static final String[] MNAME  = {
             /* 0 */ "FREECAM",
@@ -4201,9 +3560,9 @@ public class Krypton implements ModInitializer {
             /* 10*/ "FREECAM KEY",
             /* 11*/ "RECONNECT SET",
             /* 12*/ "MIN HOLE SIZE",
-            /* 13*/ "BONES FARM",
-            /* 14*/ "BONES KEY",
-            /* 15*/ "BONES DROP",
+            /* 13*/ "(entfernt)",   // ehem. Bones Farm - Index bleibt reserviert, damit 16-23 nicht verrutschen
+            /* 14*/ "(entfernt)",
+            /* 15*/ "(entfernt)",
             /* 16*/ "TRACERS",
             /* 17*/ "WHITELIST",
             /* 18*/ "SESSION FIX",
@@ -4227,7 +3586,6 @@ public class Krypton implements ModInitializer {
                 case 5 -> isPlayerEspActive;
                 case 6 -> isSpawnerEspActive;
                 case 7  -> isFullbrightActive;
-                case 13 -> isBonesFarmerActive;
                 case 16 -> isTracersActive;
                 case 18 -> isSessionFixActive;
                 case 21 -> wasSafetyLogout;
@@ -4238,7 +3596,20 @@ public class Krypton implements ModInitializer {
         private void modToggle(int i) {
             switch (i) {
                 case 0  -> { isFreecamActive       = !isFreecamActive;       toggleFreecam(client); }
-                case 1  ->   isAutoSpawnerActive    = !isAutoSpawnerActive;
+                case 1  -> {
+                    isAutoSpawnerActive = !isAutoSpawnerActive;
+                    if (isAutoSpawnerActive) {
+                        // Guard an = AFK-Betrieb. Ohne Auto Reconnect + Session Fix stünde
+                        // der Client nach dem ersten Kick im Menü, bis jemand hinschaut –
+                        // und dann schützt auch der Guard nichts mehr. Infinite dazu,
+                        // sonst ist nach der Delay-Liste (4 Versuche) Schluss.
+                        isAutoReconnectActive = true;
+                        isSessionFixActive    = true;
+                        isInfiniteReconnect   = true;
+                        saveReconnect();
+                        saveCheatStates();
+                    }
+                }
                 case 2  -> { isAutoReconnectActive  = !isAutoReconnectActive; saveReconnect(); }
                 case 3  -> { disableFreecamOnDamage = !disableFreecamOnDamage; saveFreecamSettings(); }
                 case 4  ->   isBedrockFinderActive  = !isBedrockFinderActive;
@@ -4271,15 +3642,6 @@ public class Krypton implements ModInitializer {
                 case 10 ->   isRebindingFreecam = true;
                 case 11 ->   client.setScreen(new ReconnectSettingsScreen(this));
                 case 12 -> { isEnteringHoleSize = true; holeSizeInput = ""; }
-                case 15 -> { isEnteringDropCount = true; dropCountInput = ""; }
-                case 13 -> {
-                    isBonesFarmerActive = !isBonesFarmerActive;
-                    if (!isBonesFarmerActive) {
-                        bonesFarmerState = 0; bonesFarmerDelay = 0; bonesFarmerDeliveryTimer = -1; bonesFarmerDeliveryDone = false;
-                        if (client.currentScreen instanceof HandledScreen<?>) client.player.closeHandledScreen();
-                    }
-                }
-                case 14 -> isRebindingBonesFarmer = true;
             }
         }
 
@@ -4287,17 +3649,6 @@ public class Krypton implements ModInitializer {
             // no right-click actions currently
         }
 
-        private void commitDropCount() {
-            if (!dropCountInput.isEmpty()) {
-                try {
-                    int v = Integer.parseInt(dropCountInput);
-                    if (v >= 1 && v <= 99) {
-                        bonesFarmerDropBase = v;
-                        saveDropBase();
-                    }
-                } catch (NumberFormatException ignored) {}
-            }
-        }
 
         // ── Layout helpers ───────────────────────────────────────────────────
         private int cw()            { return Math.min(MAX_CW, (width - (CATS.length-1)*COL_GAP) / CATS.length); }
@@ -4378,7 +3729,6 @@ public class Krypton implements ModInitializer {
                 float t = modOn(i) ? 1f : 0f;
                 dotAnim[i] += (t - dotAnim[i]) * 0.22f;
             }
-            dotAnim[13] += ((isBonesFarmerActive ? 1f : 0f) - dotAnim[13]) * 0.22f;
             dotAnim[16] += ((isTracersActive      ? 1f : 0f) - dotAnim[16]) * 0.22f;
             dotAnim[18] += ((isSessionFixActive   ? 1f : 0f) - dotAnim[18]) * 0.22f;
             dotAnim[21] += ((wasSafetyLogout      ? 1f : 0f) - dotAnim[21]) * 0.22f;
@@ -4426,7 +3776,7 @@ public class Krypton implements ModInitializer {
                     boolean on    = modOn(mi);
                     boolean hover = mx >= x && mx < x+cw && my >= ry && my < ry+ROW_H;
 
-                    boolean isToggle = (mi < 8 || mi == 13 || mi == 16 || mi == 18 || mi == 21);
+                    boolean isToggle = (mi < 8 || mi == 16 || mi == 18 || mi == 21);
                     if (on && isToggle) ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_ACT);
                     if (hover)         ctx.fill(x, ry, x+cw, ry+ROW_H, C_ROW_HOV);
 
@@ -4456,13 +3806,6 @@ public class Krypton implements ModInitializer {
                                    ? GLFW.glfwGetKeyName(freecamKey,0).toUpperCase() : "KEY") + "]";
                         ctx.drawText(textRenderer, kl,
                             x+cw-textRenderer.getWidth(kl)-5, ry+(ROW_H-8)/2, C_DASH, false);
-                    } else if (mi == 14) {
-                        // Bones farmer key label
-                        String bkl = isRebindingBonesFarmer ? "..." :
-                            (bonesFarmerHotkey != GLFW.GLFW_KEY_UNKNOWN && GLFW.glfwGetKeyName(bonesFarmerHotkey, 0) != null
-                                ? "[" + GLFW.glfwGetKeyName(bonesFarmerHotkey, 0).toUpperCase() + "]" : "[NONE]");
-                        ctx.drawText(textRenderer, bkl,
-                            x+cw-textRenderer.getWidth(bkl)-5, ry+(ROW_H-8)/2, C_DASH, false);
                     } else if (mi == 11) {
                         // Reconnect config – open arrow
                         ctx.drawText(textRenderer, ">", x+cw-11, ry+(ROW_H-8)/2, C_DASH, false);
@@ -4475,11 +3818,6 @@ public class Krypton implements ModInitializer {
                         String sm = "[" + sessionFixModeName() + "]";
                         ctx.drawText(textRenderer, sm,
                             x+cw-textRenderer.getWidth(sm)-5, ry+(ROW_H-8)/2, C_DASH, false);
-                    } else if (mi == 15) {
-                        String dl = isEnteringDropCount ? (dropCountInput + "|") : ("[" + bonesFarmerDropBase + "]");
-                        ctx.drawText(textRenderer, dl,
-                            x+cw-textRenderer.getWidth(dl)-5, ry+(ROW_H-8)/2,
-                            isEnteringDropCount ? 0xFF44BBFF : C_DASH, false);
                     } else {
                         ctx.drawText(textRenderer, ">", x+cw-11, ry+(ROW_H-8)/2, C_DASH, false);
                     }
@@ -4515,31 +3853,6 @@ public class Krypton implements ModInitializer {
                 setKeyBindingBoundKey(freecamKeyBinding, freecamKey);
                 saveKeybind();
                 isRebindingFreecam = false;
-                return true;
-            }
-            if (isRebindingBonesFarmer) {
-                bonesFarmerHotkey = input.key();
-                setKeyBindingBoundKey(bonesFarmerKeyBinding, bonesFarmerHotkey);
-                saveBonesFarmerKey();
-                isRebindingBonesFarmer = false;
-                return true;
-            }
-            if (isEnteringDropCount) {
-                int k = input.key();
-                if (k >= GLFW.GLFW_KEY_0 && k <= GLFW.GLFW_KEY_9) {
-                    if (dropCountInput.length() < 2) dropCountInput += (char)('0' + k - GLFW.GLFW_KEY_0);
-                } else if (k >= GLFW.GLFW_KEY_KP_0 && k <= GLFW.GLFW_KEY_KP_9) {
-                    if (dropCountInput.length() < 2) dropCountInput += (char)('0' + k - GLFW.GLFW_KEY_KP_0);
-                } else if (k == GLFW.GLFW_KEY_BACKSPACE) {
-                    if (!dropCountInput.isEmpty()) dropCountInput = dropCountInput.substring(0, dropCountInput.length()-1);
-                } else if (k == GLFW.GLFW_KEY_ENTER || k == GLFW.GLFW_KEY_KP_ENTER) {
-                    commitDropCount();
-                    isEnteringDropCount = false;
-                } else if (k == GLFW.GLFW_KEY_ESCAPE) {
-                    commitDropCount();
-                    isEnteringDropCount = false;
-                    client.setScreen(null);
-                }
                 return true;
             }
             if (isEnteringHoleSize) {
