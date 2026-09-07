@@ -256,6 +256,16 @@ public class Krypton implements ModInitializer {
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
     // in Sicherheit, während der Schutz faktisch nicht greift.
     public static boolean guardNoReachableSpawner = false;
+    // Laufende Bereitschaftsprüfung (alle 40 Ticks = 2 s), solange der Guard
+    // scharf, aber nicht im Einsatz ist: erreichbarer Spawner? Spitzhacke?
+    // Leer = bereit, sonst der Grund fürs HUD. Der Sinn: NICHT erst merken,
+    // dass etwas fehlt, wenn der Gegner schon vor der Base steht.
+    public static String guardReadyReason = "";
+    public static String guardReadyWarn   = "";   // nicht blockierend (z. B. kein Silk Touch)
+    private static int guardReadyTimer = 0;
+    // Einmaliger Versuch pro Einsatz, eine Spitzhacke aus dem Inventar in die
+    // Hotbar zu tauschen (verhindert eine Endlosschleife in State 1).
+    private static boolean guardSwapTried = false;
     // Spawner, die 3 s lang nicht getroffen wurden. Werden bei der nächsten
     // Zielwahl übersprungen, sonst wählt findReachableSpawner() sofort wieder
     // dasselbe unerreichbare Ziel und der Guard dreht sich im Kreis.
@@ -948,6 +958,68 @@ public class Krypton implements ModInitializer {
         }
     }
 
+    /** Irgendein fremder, nicht gewhitelisteter Spieler in 40 Blöcken? (Staff entscheidet der Guard selbst.) */
+    static boolean guardEnemyInRange(MinecraftClient client) {
+        if (client.world == null || client.player == null) return false;
+        for (PlayerEntity p : new ArrayList<>(client.world.getPlayers())) {
+            if (p == client.player) continue;
+            if (whitelistedPlayers.contains(p.getName().getString().toLowerCase())) continue;
+            if (client.player.squaredDistanceTo(p) < 1600) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Notfall hat Vorrang vor der Freecam. In der Freecam kann der Guard nicht
+     * arbeiten (Körper eingefroren, keine Drehung auf den Spawner möglich) –
+     * bisher war er dort schlicht AUS, die Base also ungeschützt, solange man
+     * sich umsah. Jetzt: sobald ein Fremder in Reichweite ist, wird die Freecam
+     * beendet und der Guard-Block läuft im selben Tick.
+     */
+    private static void guardExitFreecamOnEnemy(MinecraftClient client) {
+        if (!isAutoSpawnerActive || !isFreecamActive) return;
+        if (!guardEnemyInRange(client)) return;
+        isFreecamActive = false;
+        toggleFreecam(client);
+    }
+
+    /**
+     * Bereitschaftsprüfung alle 40 Ticks (2 s), solange der Guard scharf, aber
+     * nicht im Einsatz ist. Prüft genau die Voraussetzungen, an denen der
+     * Notfall-Abbau scheitern könnte – BEVOR der Gegner vor der Base steht:
+     *  - erreichbarer Spawner: derselbe Raycast wie beim Abbau (findReachableSpawner)
+     *  - Spitzhacke in Hotbar oder Inventar (im Einsatz holt State 1 sie per Swap)
+     * guardReadyReason = "" heißt bereit; sonst steht der Grund im HUD.
+     * guardReadyWarn ist nicht blockierend (z. B. kein Silk Touch: Abbau geht,
+     * nur der Spawner-Drop geht verloren – für den Schutz egal).
+     */
+    private static void updateGuardReadiness(MinecraftClient client) {
+        if (!isAutoSpawnerActive || client.world == null || client.player == null) {
+            guardReadyReason = ""; guardReadyWarn = ""; guardReadyTimer = 0;
+            return;
+        }
+        if (guardEngaged) return;                 // im Einsatz zählt nur der Abbau selbst
+        if (--guardReadyTimer > 0) return;
+        guardReadyTimer = 40;
+        String reason = "", warn = "";
+        if (findReachableSpawner(client) == null) {
+            reason = "kein Spawner in Reichweite (max. 4,5 Blöcke, freie Sicht)";
+        } else {
+            boolean pick = false, silk = false;
+            for (int i = 0; i < 36; i++) {
+                ItemStack st = client.player.getInventory().getStack(i);
+                if (!st.isIn(ItemTags.PICKAXES)) continue;
+                pick = true;
+                String enc = st.getEnchantments().toString().toLowerCase();
+                if (enc.contains("silk_touch") || enc.contains("behutsamkeit")) { silk = true; break; }
+            }
+            if (!pick)      reason = "keine Spitzhacke im Inventar";
+            else if (!silk) warn   = "ohne Silk Touch";
+        }
+        guardReadyReason = reason;
+        guardReadyWarn   = warn;
+    }
+
     /**
      * Raycast in die AKTUELLE Blickrichtung. Liefert nur einen Treffer, wenn der
      * Strahl wirklich den Ziel-Spawner trifft und dieser in normaler
@@ -1482,6 +1554,11 @@ public class Krypton implements ModInitializer {
             // Muss VOR allem anderen laufen: sorgt dafuer, dass kein gesperrter
             // Screen offen bleibt und der Mauszeiger gegriffen ist.
             ensureGuardReady(client);
+            // Notfall vor Freecam: Fremder in Reichweite → Freecam beenden, Guard übernimmt
+            // noch in diesem Tick (läuft vor dem Freecam-Tick und vor dem Guard-Block).
+            guardExitFreecamOnEnemy(client);
+            // Bereitschaft alle 2 s prüfen – BEVOR es darauf ankommt.
+            updateGuardReadiness(client);
 
             // --- DISCORD POLL ---
             discordPollTimer++;
@@ -1736,6 +1813,7 @@ public class Krypton implements ModInitializer {
                         autoSpawnerState = 0;
                         driftYaw = 0f;
                         driftPitch = 0f;
+                        guardSwapTried = false;
                     }
 
                     if (actionDelayTimer > 0) {
@@ -1749,31 +1827,45 @@ public class Krypton implements ModInitializer {
                             actionDelayTimer = 3 + (int)(Math.random() * 4);
                             break;
 
-                        case 1:
-                            int bestSlot = client.player.getInventory().getSelectedSlot();
-                            int backupPickaxe = -1;
-                            boolean foundSilkTouch = false;
-
+                        case 1: {
+                            net.minecraft.entity.player.PlayerInventory inv = client.player.getInventory();
+                            int bestSlot = -1, backupPickaxe = -1;
                             for (int i = 0; i < 9; i++) {
-                                ItemStack stack = client.player.getInventory().getStack(i);
-                                if (stack.isIn(ItemTags.PICKAXES)) {
-                                    backupPickaxe = i;
+                                ItemStack stack = inv.getStack(i);
+                                if (!stack.isIn(ItemTags.PICKAXES)) continue;
+                                if (backupPickaxe == -1) backupPickaxe = i;
+                                String enchants = stack.getEnchantments().toString().toLowerCase();
+                                if (enchants.contains("silk_touch") || enchants.contains("behutsamkeit")) { bestSlot = i; break; }
+                            }
+                            if (bestSlot == -1) bestSlot = backupPickaxe;
+
+                            if (bestSlot == -1 && !guardSwapTried && client.interactionManager != null) {
+                                // Keine Spitzhacke in der Hotbar → aus dem Inventar in den aktuellen
+                                // Hotbar-Slot tauschen. SWAP mit Button = Hotbar-Index ist exakt das
+                                // Paket, das Vanilla bei einer Zifferntaste über einem Slot schickt.
+                                // Silk Touch bevorzugt. Danach bleibt State 1 und findet die Hacke.
+                                guardSwapTried = true;
+                                int src = -1;
+                                for (int i = 9; i < 36; i++) {
+                                    ItemStack stack = inv.getStack(i);
+                                    if (!stack.isIn(ItemTags.PICKAXES)) continue;
+                                    if (src == -1) src = i;
                                     String enchants = stack.getEnchantments().toString().toLowerCase();
-                                    if (enchants.contains("silk_touch") || enchants.contains("behutsamkeit")) {
-                                        bestSlot = i;
-                                        foundSilkTouch = true;
-                                        break;
-                                    }
+                                    if (enchants.contains("silk_touch") || enchants.contains("behutsamkeit")) { src = i; break; }
+                                }
+                                if (src != -1) {
+                                    client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId,
+                                            src, inv.getSelectedSlot(), SlotActionType.SWAP, client.player);
+                                    actionDelayTimer = 2 + (int)(Math.random() * 3);
+                                    break;
                                 }
                             }
-                            if (!foundSilkTouch && backupPickaxe != -1) {
-                                bestSlot = backupPickaxe;
-                            }
-                            client.player.getInventory().setSelectedSlot(bestSlot);
-
+                            if (bestSlot != -1) inv.setSelectedSlot(bestSlot);
+                            // Ohne jede Spitzhacke wird trotzdem abgebaut (langsam) – besser als nichts.
                             autoSpawnerState = 2;
                             actionDelayTimer = 2 + (int)(Math.random() * 3);
                             break;
+                        }
 
                         case 2:
                             double dX = spawnerPos.getX() + targetOffsetX - client.player.getX();
@@ -1988,9 +2080,12 @@ public class Krypton implements ModInitializer {
             // Guard zeigt mit an, dass Menüs gesperrt sind – sonst wundert man
             // sich, warum ESC nichts tut.
             if (isAutoSpawnerActive) {
-                String guardState = guardNoReachableSpawner
-                        ? "§cKEIN SPAWNER IN REICHWEITE"   // Gegner da, Guard kann nichts tun
-                        : (guardEngaged ? "§4EINSATZ" : "§eON");
+                String guardState;
+                if (guardNoReachableSpawner)          guardState = "§cKEIN SPAWNER IN REICHWEITE";   // Gegner da, nichts abbaubar
+                else if (guardEngaged)                guardState = "§4EINSATZ";
+                else if (!guardReadyReason.isEmpty()) guardState = "§cNICHT BEREIT §7– " + guardReadyReason;
+                else if (!guardReadyWarn.isEmpty())   guardState = "§aBEREIT §e(" + guardReadyWarn + ")";
+                else                                  guardState = "§aBEREIT";
                 activeCheats.add("Guard: " + guardState + " §8[Menüs gesperrt]");
             }
             if (isSpawnerEspActive) activeCheats.add("Spawner ESP: §dON");

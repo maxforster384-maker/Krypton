@@ -127,7 +127,7 @@ Reihenfolge beim Client-Start:
    `autoSpawnerState`, `actionDelayTimer`, `sessionSeenPlayers`,
    `spawnerScriptActive/State/CurrentTarget`, `guardEngaged`, `sneakSuppressTicks`,
    `guardAimFailTicks`, `guardSneakWaitTicks`; dann `return`.
-5b. **Guard-Watchdog** — `ensureGuardReady(client)`. Läuft vor allem anderen
+5b. **Guard-Watchdog** — `ensureGuardReady(client)`, danach `guardExitFreecamOnEnemy(client)` und `updateGuardReadiness(client)`. Läuft vor allem anderen
    In-Welt-Code und stellt sicher, dass der Spawner-Schutz jederzeit abbaufähig
    ist (siehe §5.4.1).
 6. **Discord-Poll** — alle 100 Ticks (5 s) `pollDiscordAsync()`; Trigger-Flag
@@ -261,6 +261,20 @@ alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
 **Einschalten über das ClickGUI (Modul 1) schaltet automatisch mit ein:** Auto Reconnect,
 Session Fix und Infinite — und speichert sie. Guard an bedeutet AFK-Betrieb; ohne
 Reconnect stünde der Client nach dem ersten Kick im Menü, bis jemand hinschaut.
+
+**Bereitschaftsprüfung (`updateGuardReadiness()`):** alle 40 Ticks, solange der Guard
+scharf, aber nicht im Einsatz ist — erreichbarer Spawner (derselbe Raycast wie beim
+Abbau) und Spitzhacke im Inventar. Ergebnis im HUD: `Guard: §aBEREIT`, `§aBEREIT §e(ohne
+Silk Touch)` oder `§cNICHT BEREIT – <Grund>`. Man sieht also **vorher**, ob der Notfall-Abbau
+funktionieren würde, statt es erst zu merken, wenn der Gegner da ist.
+
+**Notfall vor Freecam (`guardExitFreecamOnEnemy()`):** In der Freecam kann der Guard nicht
+arbeiten (Körper eingefroren). Bisher war er dort schlicht aus. Jetzt: Fremder in 40 Blöcken
+→ Freecam wird beendet, der Guard-Block läuft im selben Tick.
+
+**Spitzhacke aus dem Inventar (State 1):** Liegt keine Spitzhacke in der Hotbar, holt der
+Guard sie per `SlotActionType.SWAP` (Vanilla-Zifferntasten-Paket) aus dem Hauptinventar in den
+aktuellen Slot — Silk Touch bevorzugt, ein Versuch pro Einsatz (`guardSwapTried`).
 
 **Spielererkennung** (Distanz² < 1600, also 40 Blöcke):
 - Whitelist-Spieler werden übersprungen.
@@ -837,7 +851,7 @@ aktiv ist. Angezeigte Einträge:
 ```
 Finder: §4<n>                       Player ESP: §bON      Tracers: §bON
 Freecam: §aON                       Fullbright: §eON
-Guard: §eON §8[Menüs gesperrt]       ← §4EINSATZ sobald guardEngaged; §cKEIN SPAWNER IN REICHWEITE wenn Gegner da, aber nichts abbaubar
+Guard: §aBEREIT §8[Menüs gesperrt]   ← §aBEREIT §e(ohne Silk Touch) | §cNICHT BEREIT – <Grund> | §4EINSATZ | §cKEIN SPAWNER IN REICHWEITE
 Spawner ESP: §dON     Reconnect: §aON
 Session Fix: §aON
 §4Rejoin gesperrt (Notfall-Logout)   ← nur wenn wasSafetyLogout gesetzt ist
