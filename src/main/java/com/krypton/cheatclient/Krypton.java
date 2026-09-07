@@ -1221,6 +1221,33 @@ public class Krypton implements ModInitializer {
         }
     }
 
+    /**
+     * Friert Kopf, Körper UND die Interpolationsfelder auf displayYaw/displayPitch.
+     *
+     * Die Renderer lerpen jeden Frame zwischen last* und dem aktuellen Wert
+     * (Entity.getYaw(tickDelta); LivingEntityRenderer: lastBodyYaw→bodyYaw,
+     * lastHeadYaw→headYaw). Werden nur die aktuellen Werte gesetzt, bleibt
+     * last* auf dem, was Vanilla im Tick davor daraus gemacht hat – der eigene
+     * Körper wackelt dann in der Freecam sichtbar hin und her.
+     *
+     * Das ist rein CLIENTSEITIG: an den Server gehen nur yaw/pitch aus
+     * getYaw()/getPitch(), und die sind seit dem Freecam-Start konstant –
+     * Vanilla schickt Rotationspakete nur bei Änderung. Ein Anti-Cheat sieht
+     * also einen Spieler, der sich nicht rührt. Das Wackeln war nie am Server,
+     * es soll aber weg, damit man dem eigenen Auge trauen kann.
+     */
+    public static void freezePlayerRotation(PlayerEntity p) {
+        if (p == null) return;
+        p.setYaw(displayYaw);
+        p.setPitch(displayPitch);
+        p.setHeadYaw(displayYaw);
+        p.setBodyYaw(displayYaw);
+        p.lastYaw     = displayYaw;
+        p.lastPitch   = displayPitch;
+        p.lastHeadYaw = displayYaw;
+        p.lastBodyYaw = displayYaw;
+    }
+
     // ==========================================
     // MAIN TICK UND RENDER EVENTS
     // ==========================================
@@ -1598,10 +1625,8 @@ public class Krypton implements ModInitializer {
                 // andere Spieler oder Anticheat.
                 displayYaw   = savedYaw;
                 displayPitch = savedPitch;
-                client.player.setYaw(displayYaw);
-                client.player.setPitch(displayPitch);
-                client.player.setHeadYaw(displayYaw);
-                client.player.setBodyYaw(displayYaw);
+                // inkl. last*-Felder, sonst lerpt der Renderer und der Körper wackelt
+                freezePlayerRotation(client.player);
 
                 prevFreecamX = freecamX;
                 prevFreecamY = freecamY;

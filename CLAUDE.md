@@ -168,7 +168,7 @@ Beim Deaktivieren → `chunkCullingEnabled = true`.
   → Freecam sofort aus.
 - **Velocity:** horizontale Velocity wird auf 0 gesetzt (kein Sliding),
   Y bleibt erhalten (Schwerkraft / vertikaler Knockback bleiben "echt").
-- **Body-Freeze:** `setYaw/setPitch/setHeadYaw/setBodyYaw` auf
+- **Body-Freeze:** `setYaw/setPitch/setHeadYaw/setBodyYaw` **und** `lastYaw/lastPitch/lastHeadYaw/lastBodyYaw` (`freezePlayerRotation()`) auf
   `displayYaw/displayPitch` — kein sichtbares Zittern für andere Spieler.
 - **prev\*-Snapshot** für Frame-Interpolation.
 - **Bewegung:** WASD relativ zu `freecamYaw`, Space = hoch, Sneak = runter.
@@ -1020,7 +1020,7 @@ In `krypton.mixins.json` unter `"client"` registriert,
 
 | Mixin | Ziel | Injection | Zweck |
 |---|---|---|---|
-| `CameraMixin` | `Camera` | `update` @TAIL | Setzt in Freecam Kamera-Position und -Rotation. Interpoliert `prev*` → aktuell mit `getTickProgress(true)` (sonst wirkt die Kamera wie 20 FPS). Friert zusätzlich jeden **Frame** Yaw/Pitch/HeadYaw/BodyYaw des Spielers ein und überschreibt damit den Vanilla-Maus-Handler vollständig. |
+| `CameraMixin` | `Camera` | `update` @TAIL | Setzt in Freecam Kamera-Position und -Rotation. Interpoliert `prev*` → aktuell mit `getTickProgress(true)` (sonst wirkt die Kamera wie 20 FPS). Friert zusätzlich jeden **Frame** Yaw/Pitch/HeadYaw/BodyYaw des Spielers ein – **inklusive der `last*`-Interpolationsfelder** (sonst lerpt der Renderer zwischen altem und neuem Wert und der eigene Körper wackelt sichtbar; rein clientseitig, der Server sieht konstante Rotation) und überschreibt damit den Vanilla-Maus-Handler vollständig. |
 | `EntityMixin` | `Entity` | `changeLookDirection` @HEAD, cancellable | Leitet in Freecam die Mausbewegung auf `freecamYaw/freecamPitch` um (`delta * 0.15`, Pitch auf ±90° geklemmt) und cancelt den Vanilla-Pfad. Nur für `MinecraftClient.getInstance().player`. |
 | `GameRendererMixin` | `GameRenderer` | `renderHand` @HEAD, cancellable | Blendet die Hand/das Item in Freecam aus. Parameter bewusst weggelassen → robust gegen Mapping-Änderungen. |
 | `KeyboardInputMixin` | `KeyboardInput` | `tick` @TAIL | Überschreibt in Freecam `input.playerInput` mit einem leeren `PlayerInput` → der Spielerkörper bewegt sich nicht mit. **Ausnahme Sneak:** läuft der Dauer-Sneak des Guards (`shouldForceSneak()`), bleibt die Sneak-Komponente `true` — der Körper duckt sich weiter, bewegt sich aber nicht. Komponenten-Reihenfolge von `PlayerInput`: `forward, backward, left, right, jump, sneak, sprint`. |

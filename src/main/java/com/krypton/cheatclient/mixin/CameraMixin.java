@@ -33,10 +33,8 @@ public abstract class CameraMixin {
 			// überschreibt damit den Vanilla-Mouse-Handler komplett)
 			MinecraftClient client = MinecraftClient.getInstance();
 			if (client.player != null) {
-				client.player.setYaw(Krypton.displayYaw);
-				client.player.setPitch(Krypton.displayPitch);
-				client.player.setHeadYaw(Krypton.displayYaw);
-				client.player.setBodyYaw(Krypton.displayYaw);
+				// inkl. last*-Interpolationsfelder – siehe Krypton.freezePlayerRotation()
+				Krypton.freezePlayerRotation(client.player);
 			}
 		}
 	}
