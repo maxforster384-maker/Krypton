@@ -774,6 +774,21 @@ Ist die Grenze erreicht, kein Reconnect mehr, stattdessen
 `§cSession dauerhaft ungültig – Client neu starten (Re-Auth nötig).`
 (Kategorie 1) bzw. `§c<n> Versuche erfolglos – Server oder Verbindung prüfen.`
 
+#### Re-Auth-Fenster (Zusammenspiel mit Re-Auth-Mods)
+
+Mods wie [Auto Reauth](https://modrinth.com/mod/auto-reauth) erneuern die Session
+genau dann, wenn der **Multiplayer-Screen** geöffnet wird. Krypton verbindet nach
+einem Kick aber direkt über `ConnectScreen` — der Check würde also nie laufen.
+Deshalb wird bei **Kategorie 1 (SESSION)** einmal pro Kick der Multiplayer-Screen
+für `REAUTH_WINDOW_TICKS` (40 Ticks = 2 s) gezeigt, bevor `doReconnect()` läuft
+(`pendingSessionReconnect` / `reauthWindowUsed`). Bei Kategorie 2 (TECHNIK)
+passiert das **nicht** — dort ist der Token ja in Ordnung.
+Ohne installierten Re-Auth-Mod kostet das nur die 2 Sekunden.
+
+`doReconnect()` ist der **einzige** Verbindungspfad und steigt bei gesetztem
+`wasSafetyLogout` sofort aus — auch das Re-Auth-Fenster kann die Sperre nicht
+umgehen.
+
 **Hart gesperrt durch `wasSafetyLogout`** (§5.4.4) — das ist der ganze Grund für
 das eigene Modul: ein generischer "Reconnect bei Fehler" würde den Client nach
 dem Notfall-Logout wieder auf den Server holen, während der Gegner noch bei den

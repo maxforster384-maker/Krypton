@@ -115,6 +115,14 @@ public class Krypton implements ModInitializer {
     // Einmal-Flag, damit der Disconnect-Screen-Handler pro Trennung nur einmal
     // laeuft (er wuerde sonst jeden Tick erneut loggen und hochzaehlen).
     private static boolean disconnectHandled = false;
+    // Re-Auth-Fenster: Mods wie "Auto Reauth" erneuern die Session, wenn der
+    // Multiplayer-Screen geoeffnet wird. Krypton verbindet nach einem Kick aber
+    // direkt ueber ConnectScreen – der Check wuerde also nie laufen. Deshalb
+    // wird bei Kategorie SESSION vorher kurz der Multiplayer-Screen gezeigt.
+    private static final int REAUTH_WINDOW_TICKS = 40;   // 2 Sekunden
+    private static int reauthWindowTicks = 0;
+    private static boolean reauthWindowUsed = false;
+    private static boolean pendingSessionReconnect = false;
 
     // Kategorie 1 – eindeutige Session-/Auth-Probleme.
     private static final String[] SESSION_KICK_PATTERNS = {
@@ -976,6 +984,29 @@ public class Krypton implements ModInitializer {
         return null;
     }
 
+    /** Führt den eigentlichen Reconnect auf lastServer aus. */
+    private static void doReconnect(MinecraftClient client) {
+        reauthWindowTicks = 0;
+        // Letzte Reissleine: kein einziger Reconnect-Pfad darf die
+        // Notfall-Logout-Sperre umgehen – auch nicht das Re-Auth-Fenster.
+        if (wasSafetyLogout) return;
+        if (lastServer == null) return;
+        attemptIndex++;
+        try {
+            net.minecraft.client.gui.screen.multiplayer.ConnectScreen.connect(
+                    new net.minecraft.client.gui.screen.TitleScreen(),
+                    client,
+                    net.minecraft.client.network.ServerAddress.parse(lastServer.address),
+                    lastServer,
+                    false,
+                    null
+            );
+        } catch (Exception e) {
+            client.setScreen(new net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen(
+                    new net.minecraft.client.gui.screen.TitleScreen()));
+        }
+    }
+
     private static boolean matchesAny(String lower, String[] patterns) {
         for (String pattern : patterns) {
             if (lower.contains(pattern)) return true;
@@ -1223,6 +1254,8 @@ public class Krypton implements ModInitializer {
                 if (ticksConnected > 60) {
                     if (wasSafetyLogout) setSafetyLogout(false);
                     sessionFixAttempts = 0;
+                    pendingSessionReconnect = false;
+                    reauthWindowUsed = false;
                 }
                 attemptIndex = 0;
                 reconnectTicks = -1;
@@ -1287,6 +1320,9 @@ public class Krypton implements ModInitializer {
                         hint  = Text.literal("§eSession-Fix (" + disconnectCategoryName(cat) + ") §7– Versuch "
                                              + sessionFixAttempts + "/" + maxTries);
                         action = "Session-Fix " + sessionFixAttempts + "/" + maxTries;
+                        // Nur bei echten Session-Fehlern lohnt das Re-Auth-Fenster;
+                        // bei Netty-/Paketfehlern ist der Token ja in Ordnung.
+                        pendingSessionReconnect = (cat == 1);
                     } else if (cat == 1) {
                         // Mehr geht aus einem Mod heraus nicht: ein echtes Re-Auth
                         // bräuchte den Microsoft-Refresh-Token des Launchers.
@@ -1320,23 +1356,28 @@ public class Krypton implements ModInitializer {
                 }
             }
 
+            // Läuft absichtlich unabhängig vom Screen weiter – während des
+            // Re-Auth-Fensters ist ja der Multiplayer-Screen offen.
+            if (reauthWindowTicks > 0) {
+                reauthWindowTicks--;
+                if (reauthWindowTicks == 0) doReconnect(client);
+            }
+
             if (client.currentScreen instanceof KryptonReconnectScreen) {
                 if (reconnectTicks > 0) {
                     reconnectTicks--;
                 } else if (reconnectTicks == 0) {
                     reconnectTicks = -1;
-                    attemptIndex++;
-                    try {
-                        net.minecraft.client.gui.screen.multiplayer.ConnectScreen.connect(
-                                new net.minecraft.client.gui.screen.TitleScreen(),
-                                client,
-                                net.minecraft.client.network.ServerAddress.parse(lastServer.address),
-                                lastServer,
-                                false,
-                                null
-                        );
-                    } catch (Exception e) {
-                        client.setScreen(new net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen(new net.minecraft.client.gui.screen.TitleScreen()));
+                    if (pendingSessionReconnect && !reauthWindowUsed) {
+                        // Einmal pro Session-Kick: kurz den Multiplayer-Screen zeigen,
+                        // damit ein Re-Auth-Mod die Session erneuern kann. Danach erst
+                        // verbinden. Ohne Re-Auth-Mod kostet das nur 2 Sekunden.
+                        reauthWindowUsed = true;
+                        reauthWindowTicks = REAUTH_WINDOW_TICKS;
+                        client.setScreen(new net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen(
+                                new net.minecraft.client.gui.screen.TitleScreen()));
+                    } else {
+                        doReconnect(client);
                     }
                 }
             }
