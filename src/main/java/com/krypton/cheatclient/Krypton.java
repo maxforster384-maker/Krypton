@@ -271,6 +271,10 @@ public class Krypton implements ModInitializer {
     // Ticks in denen der Ziel-Spawner nicht per Raycast getroffen wurde
     // (ausser Reichweite / verdeckt). Verhindert ein Haengenbleiben in State 5.
     private static int guardAimFailTicks = 0;
+    // Spawner, die 3 s lang nicht getroffen wurden. Werden bei der nächsten
+    // Zielwahl übersprungen, sonst wählt findReachableSpawner() sofort wieder
+    // dasselbe unerreichbare Ziel und der Guard dreht sich im Kreis.
+    private static final Set<BlockPos> guardFailedTargets = new HashSet<>();
     private static int guardSneakWaitTicks = 0;
 
     // --- DISCORD SPAWNER SCRIPT ---
@@ -896,16 +900,39 @@ public class Krypton implements ModInitializer {
      * würde. Der Weg über das KeyBinding ist bewusst gewählt: der Server sieht
      * exakt dasselbe wie bei einem Spieler, der Shift gedrückt hält.
      */
+    /**
+     * Setzt den Sneak-Key IDEMPOTENT auf einen Zielzustand.
+     *
+     * Warum nicht einfach setPressed(true) jeden Tick: Ist in den Steuerungs-
+     * Optionen "Schleichen umschalten" (Toggle Sneak) aktiv, ist sneakKey ein
+     * StickyKeyBinding. Dessen setPressed(true) SCHALTET den Zustand UM, statt
+     * ihn zu setzen, und setPressed(false) tut gar nichts. Ein setPressed(true)
+     * pro Tick kippt Sneak dann jeden Tick an/aus – sichtbar als Zappeln
+     * (besonders beim Springen) und als START_SNEAKING/STOP_SNEAKING-Dauerfeuer,
+     * das ein Anti-Cheat sofort als unmenschlich einstuft.
+     *
+     * Ablauf: Stimmt der Zustand schon, passiert nichts. Sonst normal setzen;
+     * hat das (Sticky-Fall) keine Wirkung, wird mit setPressed(true) gekippt.
+     * Funktioniert damit für normale UND Sticky-Bindings ohne die Option zu
+     * kennen.
+     */
+    private static void setSneakPressed(MinecraftClient client, boolean pressed) {
+        KeyBinding k = client.options.sneakKey;
+        if (k.isPressed() == pressed) return;
+        k.setPressed(pressed);
+        if (k.isPressed() != pressed) k.setPressed(true);
+    }
+
     private static void applyForceSneak(MinecraftClient client) {
         if (client == null || client.options == null) return;
         if (shouldForceSneak()) {
-            client.options.sneakKey.setPressed(true);
+            setSneakPressed(client, true);
             forcedSneakLastTick = true;
         } else if (forcedSneakLastTick) {
             // Genau einmal zurücksetzen – und dabei den ECHTEN Tastenzustand
             // wiederherstellen. Sonst hinge Sneak fest, wenn der User Shift
             // gerade gedrückt hält, während der Guard ausgeht.
-            client.options.sneakKey.setPressed(isBindingPhysicallyDown(client, client.options.sneakKey));
+            setSneakPressed(client, isBindingPhysicallyDown(client, client.options.sneakKey));
             forcedSneakLastTick = false;
         }
         if (sneakSuppressTicks > 0) sneakSuppressTicks--;
@@ -985,6 +1012,64 @@ public class Krypton implements ModInitializer {
      * Damit kann nie ein Abbau-Paket für einen Block rausgehen, den ein echter
      * Spieler gar nicht treffen könnte.
      */
+    /**
+     * Sucht den nächsten Spawner, den der Guard von der aktuellen Position aus
+     * WIRKLICH abbauen kann.
+     *
+     * Der alte 9×9×9-Scan hatte zwei Löcher, die zusammen den Bug "visiert an,
+     * baut aber nie ab" ergeben haben:
+     *  1. Er nahm den ERSTEN Treffer in Schleifenreihenfolge (x, y, z je ab -4),
+     *     also den Spawner in der Ecke des Würfels – nicht den nächsten. Bei
+     *     gestackten Spawnern ist das fast immer der falsche.
+     *  2. Die "Sichtprüfung" war keine: ein Raycast bis zur Blockmitte trifft
+     *     IMMER irgendeinen Block (spätestens den Spawner selbst) – geprüft
+     *     wurde aber nur getType()==BLOCK, nie WELCHER Block. Verdeckte Spawner
+     *     und Spawner außerhalb der Interaktionsreichweite (Würfelecke = 6,9
+     *     Blöcke, Reichweite = 4,5) galten damit als "sichtbar".
+     * Der Abbau-Raycast in State 5 prüft dagegen korrekt: erster Block auf dem
+     * Strahl == Ziel, Länge = Reichweite. Der gewählte Spawner war also
+     * regelmäßig unerreichbar → guardAimFailTicks → neu anvisieren → derselbe
+     * Spawner wird wieder gewählt → Endlosschleife ohne einen einzigen Schlag.
+     *
+     * Jetzt: exakt dieselbe Prüfung wie beim Abbau (Strahl Richtung Blockmitte,
+     * Länge = Reichweite, erster Treffer muss der Spawner sein), davon der
+     * nächstgelegene. Ziele aus guardFailedTargets werden übersprungen, damit
+     * der Guard garantiert alle Spawner durchgeht und am Ende beim
+     * Safety-Logout landet statt in einer Schleife.
+     */
+    private static BlockPos findReachableSpawner(MinecraftClient client) {
+        if (client.world == null || client.player == null) return null;
+        Vec3d eye = client.player.getEyePos();
+        double reach = client.player.getBlockInteractionRange();
+        BlockPos base = client.player.getBlockPos();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int x = -4; x <= 4; x++) {
+            for (int y = -4; y <= 4; y++) {
+                for (int z = -4; z <= 4; z++) {
+                    BlockPos pos = base.add(x, y, z);
+                    if (guardFailedTargets.contains(pos)) continue;
+                    if (!client.world.getBlockState(pos).isOf(Blocks.SPAWNER)) continue;
+                    Vec3d center = Vec3d.ofCenter(pos);
+                    double dist = eye.distanceTo(center);
+                    if (dist >= bestDist) continue;
+                    Vec3d dir = center.subtract(eye);
+                    if (dir.lengthSquared() < 1.0E-6) continue;
+                    // Nur so lang wie die Reichweite – ein Spawner, den dieser
+                    // Strahl nicht als ERSTEN Block trifft, ist auch beim Abbau
+                    // nicht treffbar.
+                    Vec3d end = eye.add(dir.normalize().multiply(reach));
+                    BlockHitResult hit = client.world.raycast(new RaycastContext(eye, end,
+                            RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, client.player));
+                    if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().equals(pos)) continue;
+                    best = pos;
+                    bestDist = dist;
+                }
+            }
+        }
+        return best;
+    }
+
     private static BlockHitResult guardRaycastTarget(MinecraftClient client, BlockPos target) {
         if (client.world == null || client.player == null || target == null) return null;
         Vec3d start = client.player.getEyePos();
@@ -1291,18 +1376,40 @@ public class Krypton implements ModInitializer {
             if (onDisconnectScreen && !disconnectHandled) {
                 disconnectHandled = true;   // pro Trennung genau einmal auswerten
 
-                // Disconnect-Grund per Reflection aus dem ersten Text-Feld des
-                // Vanilla-Screens lesen (mapping-unabhängig).
+                // Disconnect-Grund auslesen. In 1.21.11 hat DisconnectedScreen KEIN
+                // eigenes Text-Feld für den Grund mehr – er steckt im Record
+                // DisconnectionInfo (Feld "info", Accessor reason()). Die Text-Felder
+                // des Screens sind nur noch Button-Beschriftungen ("Zurück zur
+                // Serverliste"). Genau die hat der alte Code erwischt, deshalb stand
+                // im Disconnect-Log IMMER "SONSTIGES" – und ein Ban wäre damit nie als
+                // KEIN-REJOIN erkannt worden. Statische Felder werden übersprungen.
                 Text reasonText = Text.literal("Verbindung vom Server getrennt.");
                 try {
-                    for (java.lang.reflect.Field f : net.minecraft.client.gui.screen.DisconnectedScreen.class.getDeclaredFields()) {
-                        if (f.getType() == Text.class) {
-                            f.setAccessible(true);
-                            Object v = f.get(client.currentScreen);
-                            if (v != null) reasonText = (Text) v;
+                    Text found = null;
+                    java.lang.reflect.Field[] fields =
+                        net.minecraft.client.gui.screen.DisconnectedScreen.class.getDeclaredFields();
+                    // 1) Der eigentliche Grund aus DisconnectionInfo
+                    for (java.lang.reflect.Field f : fields) {
+                        if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                        if (f.getType() != net.minecraft.network.DisconnectionInfo.class) continue;
+                        f.setAccessible(true);
+                        Object v = f.get(client.currentScreen);
+                        if (v instanceof net.minecraft.network.DisconnectionInfo di && di.reason() != null) {
+                            found = di.reason();
                             break;
                         }
                     }
+                    // 2) Fallback für ältere Layouts: erstes NICHT-statisches Text-Feld
+                    if (found == null) {
+                        for (java.lang.reflect.Field f : fields) {
+                            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                            if (f.getType() != Text.class) continue;
+                            f.setAccessible(true);
+                            Object v = f.get(client.currentScreen);
+                            if (v != null) { found = (Text) v; break; }
+                        }
+                    }
+                    if (found != null) reasonText = found;
                 } catch (Exception e) {}
 
                 String reasonRaw = reasonText.getString();
@@ -1423,6 +1530,7 @@ public class Krypton implements ModInitializer {
                 sneakSuppressTicks = 0;
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
+                guardFailedTargets.clear();
                 return;
             }
 
@@ -1641,6 +1749,7 @@ public class Krypton implements ModInitializer {
                         guardEngaged = false;
                         guardAimFailTicks = 0;
                         guardSneakWaitTicks = 0;
+                        guardFailedTargets.clear();
                         break;
                     }
 
@@ -1653,24 +1762,9 @@ public class Krypton implements ModInitializer {
                     break;
                 }
 
-                BlockPos spawnerPos = null;
-                if (enemyFound) {
-                    for (int x = -4; x <= 4; x++) {
-                        for (int y = -4; y <= 4; y++) {
-                            for (int z = -4; z <= 4; z++) {
-                                BlockPos checkPos = client.player.getBlockPos().add(x, y, z);
-                                if (client.world.getBlockState(checkPos).isOf(Blocks.SPAWNER)) {
-                                    if (client.world.raycast(new RaycastContext(client.player.getEyePos(), new Vec3d(checkPos.getX()+0.5, checkPos.getY()+0.5, checkPos.getZ()+0.5), RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, client.player)).getType() == HitResult.Type.BLOCK) {
-                                        spawnerPos = checkPos;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (spawnerPos != null) break;
-                        }
-                        if (spawnerPos != null) break;
-                    }
-                }
+                // Nur ein Spawner, der von hier aus WIRKLICH abbaubar ist (sichtbar
+                // UND in Reichweite) – siehe findReachableSpawner().
+                BlockPos spawnerPos = enemyFound ? findReachableSpawner(client) : null;
 
                 // Notfall-Modus: ab hier hat der Abbau Vorrang vor allem anderen
                 // (Server-GUIs werden geschlossen, der Bones Farmer pausiert).
@@ -1842,6 +1936,9 @@ public class Krypton implements ModInitializer {
                                     guardAimFailTicks = 0;
                                     isMining = false;
                                     client.options.attackKey.setPressed(false);
+                                    // Merken – sonst wählt die Suche im nächsten Tick
+                                    // exakt dieses Ziel wieder und die Schleife beginnt von vorn.
+                                    if (lastTargetSpawner != null) guardFailedTargets.add(lastTargetSpawner);
                                     lastTargetSpawner = null;
                                     autoSpawnerState = 0;
                                     actionDelayTimer = 4 + (int)(Math.random() * 6);
@@ -1879,6 +1976,7 @@ public class Krypton implements ModInitializer {
                         guardEngaged = false;
                         guardAimFailTicks = 0;
                         guardSneakWaitTicks = 0;
+                        guardFailedTargets.clear();
 
                         if (client.getNetworkHandler() != null) {
                             client.getNetworkHandler().getConnection().disconnect(Text.literal("§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout."));
@@ -1891,6 +1989,7 @@ public class Krypton implements ModInitializer {
                     lastTargetSpawner = null;
                     guardAimFailTicks = 0;
                     guardSneakWaitTicks = 0;
+                    guardFailedTargets.clear();
                     if (isMining) {
                         client.options.attackKey.setPressed(false);
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -1907,6 +2006,7 @@ public class Krypton implements ModInitializer {
                 guardEngaged = false;
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
+                guardFailedTargets.clear();
                 if (isMining) {
                     client.options.attackKey.setPressed(false);
                     if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
