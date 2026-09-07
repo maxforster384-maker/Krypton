@@ -272,8 +272,15 @@ alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
 Solange er läuft, hat der Abbau absoluten Vorrang: der Bones Farmer pausiert und
 vom Server geöffnete GUIs werden geschlossen.
 
-**Spawner-Suche:** 9×9×9 Würfel um den Spieler, `Blocks.SPAWNER`, zusätzlich
-Line-of-Sight-Check per Raycast auf die Blockmitte.
+**Spawner-Suche:** `findReachableSpawner()` — 9×9×9 Würfel um den Spieler,
+`Blocks.SPAWNER`. Pro Kandidat **derselbe Check wie beim Abbau**: Raycast vom
+Auge Richtung Blockmitte, Länge = `getBlockInteractionRange()`, der **erste**
+getroffene Block muss der Spawner sein. Davon der nächstgelegene. Ziele aus
+`guardFailedTargets` (3 s nicht getroffen) werden übersprungen, damit der
+Guard garantiert alle Spawner durchgeht und danach beim Safety-Logout landet.
+Gibt es keinen erreichbaren Spawner, zeigt das HUD
+`Guard: §cKEIN SPAWNER IN REICHWEITE` (§6.1) — der Spieler muss dann **innerhalb**
+**von 4,5 Blöcken mit freier Sicht** stehen, sonst kann der Guard nichts tun.
 
 **State-Machine `autoSpawnerState`:**
 
@@ -345,8 +352,9 @@ Daraus folgen genau die Bugs "er baut plötzlich nicht mehr ab" / "es backt rum"
 `PlayerAction`- und Swing-Pakete raus wie beim manuellen Abbau, und nur auf
 Blöcke, die ein Raycast in echter Blickrichtung innerhalb von
 `getBlockInteractionRange()` auch trifft. Das ist **strenger** als vorher: früher
-konnte der Guard einen Spawner aus dem 9×9×9-Würfel anvisieren, der außerhalb der
-Reichweite lag.
+Zielwahl — vorher konnte der Guard einen Spawner aus der Würfelecke (bis 6,9
+Blöcke) wählen, den der Abbau-Raycast nie traf: anvisieren → Fehlschlag →
+dasselbe Ziel → Endlosschleife ohne einen einzigen Schlag.
 
 **Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),
 zählt `guardAimFailTicks`. Nach 5 Ticks geht es zurück in State 2 (neu
@@ -368,7 +376,11 @@ Solange der Guard scharf ist, sneakt der Spieler **dauerhaft**
 (`shouldForceSneak()`), auch in der Freecam.
 
 **Umsetzung:** `applyForceSneak()` setzt in `START_CLIENT_TICK`
-`client.options.sneakKey.setPressed(true)`. Der Server sieht damit exakt
+`setSneakPressed(client, true)` — **idempotent**, gesetzt wird nur bei Abweichung.
+Grund: bei aktivem *Schleichen umschalten* ist `sneakKey` ein `StickyKeyBinding`,
+dessen `setPressed(true)` den Zustand **kippt** und dessen `setPressed(false)`
+nichts tut; ein Aufruf pro Tick würde Sneak jeden Tick an/aus schalten
+(`START`/`STOP_SNEAKING`-Dauerfeuer). Der Server sieht damit exakt
 dasselbe wie bei einem Spieler, der Shift gedrückt hält —
 `KeyboardInput.tick()` → `PlayerInput.sneak()` → `ClientPlayerEntity` →
 `ClientCommandC2SPacket(START_SNEAKING)`. Kein eigener Paketpfad, keine
@@ -562,8 +574,11 @@ Radar-Logging ausgenommen.
   über das Ende hinaus und `isInfiniteReconnect` aktiv, wird der letzte Delay
   wiederholt. Default-Liste: `3, 10, 30, 60` Sekunden, max. 6 Einträge in der GUI.
 - **Jitter:** `delay * 20 + random(-15..+15)` Ticks, Minimum 20 Ticks.
-- Die Original-Disconnect-Begründung wird per Reflection aus dem ersten
-  `Text`-Feld des `DisconnectedScreen` gelesen und im eigenen Screen angezeigt.
+- Die Original-Disconnect-Begründung kommt aus `DisconnectionInfo.reason()` (Feld
+  `info` des `DisconnectedScreen`, per Reflection nach **Typ** gesucht, statische
+  Felder übersprungen). **Nicht** das erste `Text`-Feld: das ist in 1.21.11 nur
+  eine Button-Beschriftung — genau der Fehler, durch den früher **jede** Trennung
+  als `SONSTIGES` galt und Bans nie als `KEIN-REJOIN` erkannt wurden.
 - `KryptonReconnectScreen` zeigt einen Countdown-Button ("Reconnect in X…",
   Klick = sofort), eine optionale **Hinweiszeile** (`hint`) und "Cancel".
   Bei gesperrtem Rejoin (`autoBlocked`) ist der Reconnect-Button deaktiviert und
@@ -746,7 +761,7 @@ reagiert wird, steuert `sessionFixMode`.
 
 | # | Name | Muster (Auszug) |
 |---|---|---|
-| **3** | `KEIN-REJOIN` | `banned`, `gebannt`, `tempban`, `kicked by`, `gekickt von`, `whitelist`, `outdated client`, `unsupported version`, `server is full`, `no permission` |
+| **3** | `KEIN-REJOIN` | `banned`, `gebannt`, `tempban`, `kicked by`, `gekickt von`, `outdated client`, `unsupported version`, `no permission` — **bewusst nicht** `whitelist` / `server is full`: beides ist vorübergehend (Wartung, voller Server) und soll endlos weiterprobiert werden → Kategorie 0, normaler Auto-Reconnect |
 | **1** | `SESSION` | `invalid session`, `failed to verify username`, `unverified_username`, `authentication servers`, `not authenticated`, `bad login`, `session expired`, `already logged in`, **`restarting your game` / `restart your launcher`** |
 | **2** | `TECHNIK` | `internal exception`, `internal error`, `error id`, `io.netty`, `java.lang`, `java.io`, `java.net`, `exception`, `timed out`, `timeout`, `connection reset`, `forcibly closed`, `broken pipe`, `readerindex`, `out of bounds`, `keepalive`, `bad packet`, `decoder`, `nullpointer`, `socket`, `at net.minecraft` |
 | **0** | `SONSTIGES` | alles übrige |
@@ -865,7 +880,7 @@ aktiv ist. Angezeigte Einträge:
 ```
 Finder: §4<n>                       Player ESP: §bON      Tracers: §bON
 Freecam: §aON                       Fullbright: §eON
-Guard: §eON §8[Menüs gesperrt]       ← §4EINSATZ statt ON, sobald guardEngaged
+Guard: §eON §8[Menüs gesperrt]       ← §4EINSATZ sobald guardEngaged; §cKEIN SPAWNER IN REICHWEITE wenn Gegner da, aber nichts abbaubar
 Bones: §aON                         Spawner ESP: §dON     Reconnect: §aON
 Session Fix: §aON
 §4Rejoin gesperrt (Notfall-Logout)   ← nur wenn wasSafetyLogout gesetzt ist
@@ -1053,7 +1068,7 @@ Wird an fünf Stellen eingesetzt, um Mapping-Änderungen zu überleben:
   `GameOptions` zu und sucht dessen `setValue(Object)`-Methode.
   **Hinweis: aktuell definiert, aber nicht aufgerufen** (der `PerspectiveMixin`
   hat diesen Ansatz ersetzt)
-- Auslesen des Disconnect-Grunds aus dem ersten `Text`-Feld von `DisconnectedScreen`
+- Auslesen des Disconnect-Grunds: Feld vom Typ `DisconnectionInfo` in `DisconnectedScreen` → `reason()`; Fallback erstes **nicht-statisches** `Text`-Feld
 - `snapCursorToSlot()` — liest `x`/`y` (GUI-Offset) aus `HandledScreen`
 
 ### 9.3 GUI-Slot-Erkennung
@@ -1314,7 +1329,7 @@ Wer einen eigenen Testserver hat, kann Kick-Texte auch gezielt durchspielen:
 
 **Vollständiger Test mit zweitem Account:**
 1. Zweiten Account (nicht in der Whitelist, kein Staff-Stern) besorgen.
-2. Guard einschalten, neben einem eigenen Spawner stehen, Spitzhacke mit
+2. Guard einschalten, **höchstens 4,5 Blöcke** neben einem eigenen Spawner mit freier Sicht stehen (HUD darf **nicht** `KEIN SPAWNER IN REICHWEITE` zeigen), Spitzhacke mit
    Behutsamkeit in der Hotbar.
 3. Mit dem zweiten Account auf **unter 40 Blöcke** herangehen.
 4. Erwartet: Guard dreht sich auf den Spawner, baut ihn ab, und trennt danach
