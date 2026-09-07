@@ -56,7 +56,7 @@ Krypton-Client/
 │   └── logs/, crash-reports/, saves/, screenshots/
 └── src/main/
     ├── java/com/krypton/cheatclient/
-    │   ├── Krypton.java          ~2965 Zeilen — die gesamte Client-Logik
+    │   ├── Krypton.java          ~3850 Zeilen — die gesamte Client-Logik
     │   └── mixin/
     │       ├── CameraMixin.java
     │       ├── EntityMixin.java
@@ -88,12 +88,19 @@ Reihenfolge beim Client-Start:
 
 1. **Alle Settings laden** — `loadWhitelist()`, `loadKeybind()`, `loadFullbright()`,
    `loadReconnect()`, `loadGuiKey()`, `loadFreecamSettings()`, `loadLogs()`,
-   `loadCheatStates()`, `loadBonesFarmerKey()`, `loadDropBase()`, `loadDiscordConfig()`.
+   `loadCheatStates()`, `loadBonesFarmerKey()`, `loadDropBase()`, `loadDiscordConfig()`,
+   `loadSafetyLogout()`, `loadStaffDetect()`, `loadDisconnectLog()`.
 2. **Keybinds registrieren** über `KeyBindingHelper` (Kategorie `MISC`):
    - `key.krypton.gui` — Default `RIGHT_SHIFT`, überschrieben von `lastSavedGuiKey`
    - `key.krypton.freecam` — Default aus `freecamKey` (Fallback `V`)
    - `key.krypton.bonesfarmer` — Default aus `bonesFarmerHotkey` (Fallback `UNKNOWN`)
 3. **`ClientLifecycleEvents.CLIENT_STOPPING`** → `saveCheatStates()`
+3b. **`ClientTickEvents.START_CLIENT_TICK`** → `applyForceSneak()` (Auto-Sneak des
+   Spawner-Schutzes, siehe §5.4.2). Bewusst **START** und nicht END: der Handler
+   hängt am Kopf von `MinecraftClient.tick()` und läuft damit vor
+   `world.tickEntities()` → `KeyboardInput.tick()`. Würde man den Sneak erst in
+   `END_CLIENT_TICK` setzen, gäbe es beim Loslassen der echten Sneak-Taste jedes
+   Mal einen Tick ohne Sneak und damit ein `STOP_SNEAKING`/`START_SNEAKING`-Paketpaar.
 4. **Chat-Listener** (`ClientReceiveMessageEvents.CHAT` + `.GAME`) für die
    Bones-Farmer-Delivery-Erkennung
 5. **Interaktions-Callbacks** (`AttackBlock`, `AttackEntity`, `UseBlock`,
@@ -112,12 +119,20 @@ Reihenfolge beim Client-Start:
    bei Abweichung → Feld aktualisieren + speichern. So werden Änderungen aus den
    Vanilla-Controls übernommen.
 3. **Server-Tracking** — `lastServer = client.getCurrentServerEntry()`.
-   In der Welt: `ticksConnected++`; nach 60 Ticks wird `wasSafetyLogout` gelöscht
-   (verhindert Reset während des kurzen Disconnect-Übergangs).
-4. **Auto-Reconnect** — siehe §5.7.
+   In der Welt: `ticksConnected++`; nach 60 Ticks werden `wasSafetyLogout`
+   (via `setSafetyLogout(false)`, löscht auch die Datei) und `sessionFixAttempts`
+   zurückgesetzt. Die 60 Ticks verhindern ein Reset während des kurzen
+   Disconnect-Übergangs; da bei gesetztem Flag **jeder** automatische Rejoin
+   gesperrt ist, kann eine Verbindung, die 60 Ticks hält, nur manuell zustande
+   gekommen sein.
+4. **Auto-Reconnect / Session-Fix** — siehe §5.7 und §5.11.
 5. **Welt == null** → Reset von `isFreecamActive`, `hasMinedSpawner`,
    `autoSpawnerState`, `actionDelayTimer`, `sessionSeenPlayers`,
-   `spawnerScriptActive/State/CurrentTarget`; dann `return`.
+   `spawnerScriptActive/State/CurrentTarget`, `guardEngaged`, `sneakSuppressTicks`,
+   `guardAimFailTicks`, `guardSneakWaitTicks`; dann `return`.
+5b. **Guard-Watchdog** — `ensureGuardReady(client)`. Läuft vor allem anderen
+   In-Welt-Code und stellt sicher, dass der Spawner-Schutz jederzeit abbaufähig
+   ist (siehe §5.4.1).
 6. **Discord-Poll** — alle 100 Ticks (5 s) `pollDiscordAsync()`; Trigger-Flag
    vom Background-Thread wird übernommen (`spawnerScriptState = 1`).
 7. **Keybind-Handling** — GUI öffnen, Freecam togglen, Bones Farmer togglen.
@@ -238,7 +253,7 @@ künstlich erzeugte Hohlräume/Basen.
 
 ---
 
-### 5.4 Auto Spawner / "Guard" (`isAutoSpawnerActive`)
+### 5.4 Auto Spawner / "Guard" / Spawner-Schutz (`isAutoSpawnerActive`)
 
 Notfall-Automatik: Sobald ein **fremder Spieler** in Reichweite kommt, werden
 alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
@@ -248,10 +263,14 @@ alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
 **Spielererkennung** (Distanz² < 1600, also 40 Blöcke):
 - Whitelist-Spieler werden übersprungen.
 - **Staff erkannt** (`getPlayerRank()` liefert nicht-leer) → Guard schaltet sich
-  **selbst ab**, Attack/Sneak los, `cancelBlockBreaking()`, alle States zurück.
+  **selbst ab**, Attack los, `cancelBlockBreaking()`, alle States zurück.
   Es wird nichts abgebaut und sich nicht ausgeloggt ("still halten").
 - **Normaler Spieler** → `enemyFound = true`, Logout-Log wird geschrieben
   (`lastLogoutLog` mit Uhrzeit, Name, Distanz, XYZ) und gespeichert.
+
+**`guardEngaged`** (`enemyFound || hasMinedSpawner`) markiert den Notfall-Modus.
+Solange er läuft, hat der Abbau absoluten Vorrang: der Bones Farmer pausiert und
+vom Server geöffnete GUIs werden geschlossen.
 
 **Spawner-Suche:** 9×9×9 Würfel um den Spieler, `Blocks.SPAWNER`, zusätzlich
 Line-of-Sight-Check per Raycast auf die Blockmitte.
@@ -263,9 +282,9 @@ Line-of-Sight-Check per Raycast auf die Blockmitte.
 | 0 | Initialisierung | 3–6 Ticks |
 | 1 | Beste Pickaxe in der Hotbar wählen (Silk Touch bevorzugt, sonst beliebige Pickaxe als Backup) | 2–4 |
 | 2 | Auf den Spawner drehen (siehe Rotation unten) | — |
-| 3 | `sneakKey` drücken | 1–2 |
-| 4 | `attackKey` drücken, `isMining = true` | — |
-| 5 | Attack halten + Brownian-Drift | — |
+| 3 | Warten bis der Sneak serverseitig anliegt (`player.isSneaking()`), Notausstieg nach 10 Ticks | 1–2 |
+| 4 | `attackKey` drücken, `isMining = true`, `guardAimFailTicks = 0` | — |
+| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1) | — |
 
 **Rotation (State 2):** Zielwinkel aus `atan2`. Es wird ein
 **GCD-Snapping** angewendet, das die Vanilla-Mausbewegung nachbildet:
@@ -284,15 +303,160 @@ Schrittgröße `diff * 0.3`, geklemmt auf ±20°. Fertig bei `|yawDiff| < 2 && |
   bewusst **kein** sinusförmiges Muster
 - Alle Rotationen laufen durch das GCD-Snapping
 
-**Safety-Logout:** Wenn `hasMinedSpawner == true` und kein Spawner mehr gefunden
-wird, startet `safetyLogoutTimer` (8–24 Ticks). Bei 0: alle Keys los, Guard aus,
-`wasSafetyLogout = true` (unterdrückt den Auto-Reconnect!), dann
+---
+
+#### 5.4.1 Abbau-Garantie — warum der Guard nicht mehr über Vanilla abbaut
+
+**Das Problem.** `MinecraftClient.tick()` ruft `handleBlockBreaking(boolean)` mit
+einem Flag auf, in das u. a. `currentScreen == null` und
+`mouse.isCursorLocked()` einfließen. Ist das Flag `false`, läuft intern
+`cancelBlockBreaking()` und der Abbaufortschritt fällt auf 0 zurück.
+Zusätzlich ruft `MinecraftClient.setScreen()` beim Öffnen eines Screens
+`KeyBinding.unpressAll()` auf — der vom Guard gedrückte Attack-Key geht damit
+wieder los.
+
+Daraus folgen genau die Bugs "er baut plötzlich nicht mehr ab" / "es backt rum":
+
+| Auslöser | Vanilla-Folge |
+|---|---|
+| ESC gedrückt | `GameMenuScreen` offen → Abbau tot |
+| Fensterfokus weg (Alt-Tab, Remote-Desktop-Trennung) bei aktivem *Pause on Lost Focus* | `openGameMenu(true)` → Abbau tot |
+| Chat / Inventar / Optionen offen | Abbau tot |
+| Server öffnet eine GUI | Abbau tot |
+| Nach dem Schließen eines Screens ist der Cursor nicht wieder gegriffen | `isCursorLocked() == false` → Abbau tot |
+
+**Die Lösung — drei Ebenen, weil jede einzelne Lücken lässt:**
+
+1. **`openGameMenu(boolean)` wird geblockt** (`MinecraftClientMixin`).
+   Das ist der einzige Vanilla-Einstieg ins Pausenmenü und deckt sowohl ESC als
+   auch den Fokusverlust ab.
+2. **`setScreen(Screen)` filtert** über `Krypton.isScreenBlocked()`
+   (`MinecraftClientMixin`) — siehe §5.4.3.
+3. **Der Guard baut selbst ab.** State 5 macht einen echten Raycast in der
+   aktuellen Blickrichtung (`guardRaycastTarget()`) und ruft bei einem Treffer
+   auf dem Ziel-Spawner `interactionManager.updateBlockBreakingProgress()` +
+   `swingHand()` — genau wie die Freecam. Damit hängt der Abbau an **keinem**
+   Vanilla-Gate mehr (Screen, Cursor-Lock, `attackCooldown`, Fensterfokus).
+   Vanillas `handleBlockBreaking` wird währenddessen gecancelt
+   (`Krypton.guardIsMining()`), sonst brechen sich beide Pfade gegenseitig ab —
+   derselbe Desync, der schon bei der Freecam auftrat.
+
+**Anti-Cheat-Sicht:** Am Paketbild ändert sich nichts. Es gehen dieselben
+`PlayerAction`- und Swing-Pakete raus wie beim manuellen Abbau, und nur auf
+Blöcke, die ein Raycast in echter Blickrichtung innerhalb von
+`getBlockInteractionRange()` auch trifft. Das ist **strenger** als vorher: früher
+konnte der Guard einen Spawner aus dem 9×9×9-Würfel anvisieren, der außerhalb der
+Reichweite lag.
+
+**Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),
+zählt `guardAimFailTicks`. Nach 5 Ticks geht es zurück in State 2 (neu
+anvisieren), nach 60 Ticks wird das Ziel freigegeben (`autoSpawnerState = 0`),
+damit stattdessen der Safety-Logout greifen kann.
+
+**Der Watchdog** `ensureGuardReady()` läuft jeden Tick, solange
+`guardLockActive()`:
+1. gesperrter Screen offen → `setScreen(null)`
+2. `guardEngaged` + Server-GUI offen → `player.closeHandledScreen()`
+   (schickt das `CloseHandledScreen`-Paket, also kein Desync)
+3. kein Screen, Fenster fokussiert, Cursor nicht gegriffen → `mouse.lockCursor()`
+
+---
+
+#### 5.4.2 Auto-Sneak
+
+Solange der Guard scharf ist, sneakt der Spieler **dauerhaft**
+(`shouldForceSneak()`), auch in der Freecam.
+
+**Umsetzung:** `applyForceSneak()` setzt in `START_CLIENT_TICK`
+`client.options.sneakKey.setPressed(true)`. Der Server sieht damit exakt
+dasselbe wie bei einem Spieler, der Shift gedrückt hält —
+`KeyboardInput.tick()` → `PlayerInput.sneak()` → `ClientPlayerEntity` →
+`ClientCommandC2SPacket(START_SNEAKING)`. Kein eigener Paketpfad, keine
+Sonderbehandlung.
+
+**Warum START und nicht END:** siehe §3, Punkt 3b — sonst gäbe es beim Loslassen
+der echten Sneak-Taste jedes Mal einen Tick ohne Sneak und damit ein
+`STOP_SNEAKING`/`START_SNEAKING`-Paketpaar.
+
+**Wiederherstellung:** Geht der Guard aus, setzt `applyForceSneak()` den Key
+**genau einmal** auf den *echten* physischen Tastenzustand zurück
+(`isBindingPhysicallyDown()` über `InputUtil.isKeyPressed()` bzw.
+`glfwGetMouseButton()`). Ohne das bliebe Sneak hängen, wenn der User Shift
+gerade gedrückt hält. Manuelles Sneaken und Auto-Sneak können sich deshalb nicht
+in die Quere kommen — es gibt nur einen Schreibpfad.
+
+**Sneak-Unterdrückung (`sneakSuppressTicks`) — wichtig:**
+Ein sneakender Spieler bekommt **serverseitig keine Block-GUI**:
+`ServerPlayerInteractionManager.interactBlock()` prüft
+`player.shouldCancelInteraction()` (= `isSneaking()`) und ruft dann statt
+`BlockState.onUse()` das Item-`useOnBlock()` auf — mit einem Block in der Hand
+wird also sogar **gesetzt** statt geöffnet. Wer den Auto-Sneak einbaut, muss ihn
+darum für jeden Rechtsklick auf einen Block kurz abmelden:
+
+- `suppressSneak(ticks)` setzt das Fenster,
+- `isSneakReleased(client)` prüft, ob der Sneak serverseitig wirklich weg ist.
+
+Angemeldet ist das an zwei Stellen:
+- **Bones Farmer State 3** (Rechtsklick auf den Spawner): meldet ab, wartet
+  2 Ticks, klickt erst wenn `isSneakReleased()` true ist.
+- **Freecam-Rechtsklick**: meldet ab, solange die rechte Maustaste hängt.
+
+**Was Sneak in Vanilla wirklich tut** (damit die Erwartung stimmt): Sneaken
+verhindert, dass man von der Kante eines Blocks fällt bzw. geschoben wird
+(`Entity.adjustMovementForSneaking`), senkt die Hitbox von 1.8 auf 1.5 und
+unterdrückt die Block-Interaktion (siehe oben). Es verhindert **keinen**
+Knockback und keine Fischerruten-Züge.
+
+---
+
+#### 5.4.3 Menü-Sperre
+
+Solange `guardLockActive()` (Guard an **und** in einer Welt) gilt, blockt
+`isScreenBlocked()` folgende Screens:
+
+| Geblockt | Grund |
+|---|---|
+| `GameMenuScreen` | ESC + *Pause on Lost Focus* — der Hauptauslöser |
+| `ChatScreen` (**exakt** `getClass()`) | Chat/Command-Eingabe |
+| `InventoryScreen`, `CreativeInventoryScreen` | eigenes Inventar |
+| `AdvancementsScreen`, `StatsScreen`, `SocialInteractionsScreen` | — |
+| alles in `net.minecraft.client.gui.screen.option.*` | Optionen |
+
+**Nicht geblockt** (bewusst eine Blocklist, keine Allowlist — sonst könnte sich
+der Client festfahren):
+- `null` (Schließen geht immer)
+- alle `com.krypton.*`-Screens → das ClickGUI bleibt der Weg, den Guard
+  wieder auszuschalten
+- alle übrigen `HandledScreen`s (Server-GUIs, die der Bones Farmer braucht)
+- `SleepingChatScreen` (deshalb der exakte `getClass()`-Vergleich beim Chat) —
+  sonst läge der Spieler ohne UI im Bett fest
+- Disconnect-, Tod-, Lade- und Ressourcenpack-Screens
+
+Die Sperre ist rein clientseitig, der Server merkt davon nichts. Im HUD steht
+`Guard: ON §8[Menüs gesperrt]`, damit klar ist, warum ESC nichts tut.
+
+---
+
+#### 5.4.4 Safety-Logout
+
+Wenn `hasMinedSpawner == true` und kein Spawner mehr gefunden wird, startet
+`safetyLogoutTimer` (8–24 Ticks). Bei 0: Attack los, `cancelBlockBreaking()`,
+Guard aus, **`setSafetyLogout(true)`**, dann
 `networkHandler.getConnection().disconnect(...)` mit der Nachricht
 `§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout.`
 
-**Persistenz:** `isAutoSpawnerActive` in `krypton_cheats.txt` (Zeile 3).
+`setSafetyLogout(true)` schreibt `krypton_safelogout.txt`. Damit ist jeder
+**automatische** Rejoin gesperrt — Auto Reconnect *und* Session-Fix, und zwar
+auch über einen Client-Neustart hinweg. Der `KryptonReconnectScreen` zeigt in
+dem Fall `§4Notfall-Logout aktiv – Auto-Reconnect gesperrt`; der
+Reconnect-Button ist deaktiviert (`active = false`), damit die Sperre nicht mit
+einem versehentlichen Klick fällt.
 
----
+Aufgehoben wird die Sperre nur durch eine **manuelle** Verbindung, die 60 Ticks
+stabil hält (§4, Punkt 3).
+
+**Persistenz:** `isAutoSpawnerActive` in `krypton_cheats.txt` (Zeile 3),
+`wasSafetyLogout` in `krypton_safelogout.txt`.
 
 ### 5.5 Bones Farmer (`isBonesFarmerActive`)
 
@@ -401,12 +565,24 @@ Radar-Logging ausgenommen.
 - Die Original-Disconnect-Begründung wird per Reflection aus dem ersten
   `Text`-Feld des `DisconnectedScreen` gelesen und im eigenen Screen angezeigt.
 - `KryptonReconnectScreen` zeigt einen Countdown-Button ("Reconnect in X…",
-  Klick = sofort) und "Cancel" (schaltet Auto-Reconnect ab, speichert, geht ins
-  Multiplayer-Menü).
+  Klick = sofort), eine optionale **Hinweiszeile** (`hint`) und "Cancel".
+  Bei gesperrtem Rejoin (`autoBlocked`) ist der Reconnect-Button deaktiviert und
+  "Cancel" heißt "Zum Serverbrowser" — und schaltet den Auto-Reconnect dann
+  **nicht** ab, weil er nicht die Ursache ist.
 - Bei `reconnectTicks == 0`: `attemptIndex++`, dann `ConnectScreen.connect(...)`;
   bei Exception → Multiplayer-Menü.
-- **`wasSafetyLogout`** blockt den Reconnect gezielt nach einem Guard-Logout und
-  wird erst nach 60 Ticks stabiler Verbindung wieder gelöscht.
+
+**Entscheidungsreihenfolge im Disconnect-Handler** (erster Treffer gewinnt):
+
+| # | Bedingung | Verhalten |
+|---|---|---|
+| 1 | `wasSafetyLogout` | **kein** Reconnect, Button gesperrt, Hinweis "Notfall-Logout aktiv" |
+| 2 | `lastServer == null` | nichts (kein Server bekannt) |
+| 3 | Session-Kick **und** `isSessionFixActive` | Session-Fix, siehe §5.11 |
+| 4 | `isAutoReconnectActive` | normale Delay-Leiter |
+
+Punkt 1 steht bewusst ganz oben: der Notfall-Logout darf durch **keinen**
+anderen Pfad ausgehebelt werden.
 
 **Persistenz:** `krypton_reconnect.txt` — Zeile 1 aktiv, Zeile 2 infinite,
 Zeile 3 komma-separierte Delays.
@@ -457,21 +633,224 @@ einen Listeneintrag entfernt ihn. Klick-Erkennung läuft über direktes
 
 ### 5.10 Staff-/Rank-Erkennung (`getPlayerRank`)
 
-Sammelt drei Quellen in einen String und sucht darin case-insensitiv nach
-Rang-Schlüsselwörtern:
+Der Zielserver markiert sein Team **nicht mehr per Klartext** ("Admin"), sondern
+mit einem **farbigen Stern** im Tab-/Team-Prefix:
 
-1. Tab-Listen-Display-Name (`networkHandler.getPlayerListEntry(uuid).getDisplayName()`)
-2. Entity-Display-Name (Name über dem Kopf) — kann bei frisch joinenden Spielern
-   `null` sein, daher in `try/catch`
-3. Scoreboard-Team-Name **und** Team-Display-Name
+| Sternfarbe | Rang | Flag |
+|---|---|---|
+| grün | Mod / Admin | `staffStarGreen` (Default an) |
+| blau / aqua | Helper / Owner | `staffStarBlue` (Default an) |
+| lila / magenta | Developer | `staffStarPurple` (Default an) |
+| andere (rot, orange, gelb) | generisch "Staff" | `staffStarOther` (Default **aus**) |
 
-**Erkennungsreihenfolge** (erster Treffer gewinnt):
+`getPlayerRank()` prüft zwei Signale, in dieser Reihenfolge:
+
+**1. Stern-Rank.** Quellen werden einzeln geprüft, beim ersten Treffer wird
+abgebrochen:
+`PlayerListEntry.getDisplayName()` → `player.getDisplayName()` →
+`Team.getPrefix()` → `Team.getSuffix()` → `Team.getDisplayName()`.
+
+`collectStars()` läuft mit `Text.visit(StyledVisitor, Style.EMPTY)` über den
+Component-Baum und liest die Farbe aus **beiden** Quellen, die auf Servern
+vorkommen:
+- dem gemergten `Style` (`Style.getColor().getRgb()`), und
+- **Legacy-§-Codes im Rohstring** — inklusive `§r` (zurück auf die Style-Farbe),
+  der Formatierungscodes `§k§l§m§n§o` (Farbe bleibt stehen) und dem
+  BungeeCord-Hex-Format `§x§R§R§G§G§B§B`.
+
+`starColorFamily(rgb)` klassifiziert über den **Farbton (Hue)**, nicht über
+feste RGB-Werte — damit funktioniert es auch mit beliebigen Hex-Farben:
+
+| Hue | Familie |
+|---|---|
+| Sättigung < ~23 % oder max < 40 | unbestimmt (weiß/grau/schwarz → **kein** Staff) |
+| 75°–170° | grün |
+| 170°–265° | blau/aqua |
+| 265°–330° | lila/magenta |
+| sonst | andere |
+
+Geprüfte Referenzwerte: `§a`=120°, `§2`=120°, `§9`=240°, `§1`=240°, `§b`=180°,
+`§3`=180°, `§d`=300°, `§5`=300°, `§c`=0°, `§6`=40°, `§e`=60°, `§f`/`§7`/`§8`
+fallen über die Sättigungsschwelle raus.
+
+**Plausibilitäts-Sicherung (`staffDetectSane`) — wichtig.** Auf Servern wie
+DonutSMP hat **jeder** Spieler ein farbiges Deko-Symbol im Tab-Prefix. Würde so
+ein Symbol fälschlich als Stern gezählt, wäre plötzlich der halbe Server "Staff"
+und der Guard würde sich abschalten — also genau dann nicht schützen, wenn es
+darauf ankommt. Deshalb prüft `updateStaffSanity()` alle 40 Ticks: gelten bei
+mindestens 5 sichtbaren Spielern **mehr als die Hälfte** als Staff, wird die
+Stern-Erkennung als kaputt markiert und ignoriert. Es bleibt die
+Klartext-Erkennung, und im HUD steht `§cStern-Erkennung unplausibel (n/m) – nur
+Text`. Lieber eine sichtbare Warnung als ein stillschweigend abgeschalteter
+Schutz.
+
+**Eigene Glyphen (`krypton_staffglyphs.txt`).** Viele Server benutzen
+Resourcepack-Symbole aus der **Private Use Area** (U+E000–U+F8FF), die in keiner
+Unicode-Sternliste stehen. Über die Datei lässt sich jeder Codepoint nachtragen
+(`U+E001` oder `E001` pro Zeile) — ohne Neubau. `isStarGlyph()` prüft die
+eingebaute Liste **und** diese Datei.
+
+**Erkannte Stern-Glyphen:** 32 Unicode-Sterne (`★ ☆ ⚝ ✦ ✧ ✩ ✪ ✫ ✬ ✭ ✮ ✯ ✰ ✱ ✲ ✳
+✴ ✵ ✶ ✷ ✸ ✹ ✺ ✻ ✼ ✽ ❂ ❃ ❉ ❊ ❋ ⭐`), im Quelltext als Unicode-Escapes hinterlegt,
+damit die Erkennung nicht von der Dateikodierung abhängt.
+**ASCII `*` zählt bewusst nicht** — das kommt in Deko-Prefixes viel zu häufig
+vor und würde False Positives erzeugen.
+
+**2. Klartext-Fallback** (`getTextRank`, abschaltbar über `staffTextRanks`).
+Unverändert die alte Logik: Tab-Name + Entity-Name + Team-Name/-Displayname in
+einen String, dann case-insensitiv
 `owner` → `sradmin`/`sr.admin` → `admin` → `srmod`/`sr.mod` →
-`moderator`/`[mod`/`mod]`/`" mod "` → `srhelper`/`sr.helper` → `helper`
-→ sonst `""` (kein Staff).
+`moderator`/`[mod`/`mod]`/`" mod "` → `srhelper`/`sr.helper` → `helper`.
+
+#### Warum das so gebaut ist
+
+Für den Guard zählt nur **Staff ja/nein** — die Farbe bestimmt ausschließlich
+das angezeigte Label. Beide Fehlerrichtungen sind teuer:
+
+- **False Positive** (normaler Spieler wird als Staff gelesen) → Guard schaltet
+  sich ab und schützt nicht mehr.
+- **False Negative** (Staff wird übersehen) → Guard baut vor Staff ab und loggt
+  aus.
+
+Deshalb ist nichts hart verdrahtet: die vier Farbfamilien und der
+Klartext-Fallback sind einzeln schaltbar (`krypton_staffdetect.txt`), und der
+**Staff-Scan-Screen** (§6.3) zeigt live, was der Server wirklich schickt —
+Rohtext mit sichtbar gemachten `§`-Codes, jeden gefundenen Stern mit Codepoint
+und Hex-Farbe, die abgeleitete Familie und ob sie als Staff zählt.
+**Vor dem Scharfschalten auf einem neuen Server einmal dort gegenprüfen.**
 
 `isStaffNearby()` prüft alle Spieler in Distanz² ≤ 1600 (40 Blöcke), ohne
 Whitelist-Einträge.
+
+---
+
+### 5.11 Session Fix (`isSessionFixActive`, `sessionFixMode`)
+
+Fängt kaputte Verbindungsabbrüche ab und verbindet kontrolliert neu.
+
+**Warum das nicht mit einer einzigen Textsuche geht:** "Invalid Session" ist nur
+*eine* von vielen Formulierungen. Auf Servern mit vielen Plugins (DonutSMP &
+Co.) kommt genauso oft ein roher Java-/Netty-Stacktrace mit langen Zahlen
+zurück, z. B.
+
+```
+Internal Exception: io.netty.handler.codec.DecoderException:
+java.lang.IndexOutOfBoundsException: Index 1146 out of bounds for length 0
+```
+
+oder `An internal error occurred in your connection. Error ID: 8347261993844`.
+Deshalb wird der Grund **kategorisiert** (`classifyDisconnect`), und wie breit
+reagiert wird, steuert `sessionFixMode`.
+
+#### Kategorien (erster Treffer gewinnt, Reihenfolge ist Absicht)
+
+| # | Name | Muster (Auszug) |
+|---|---|---|
+| **3** | `KEIN-REJOIN` | `banned`, `gebannt`, `tempban`, `kicked by`, `gekickt von`, `whitelist`, `outdated client`, `unsupported version`, `server is full`, `no permission` |
+| **1** | `SESSION` | `invalid session`, `failed to verify username`, `unverified_username`, `authentication servers`, `not authenticated`, `bad login`, `session expired`, `already logged in`, **`restarting your game` / `restart your launcher`** |
+| **2** | `TECHNIK` | `internal exception`, `internal error`, `error id`, `io.netty`, `java.lang`, `java.io`, `java.net`, `exception`, `timed out`, `timeout`, `connection reset`, `forcibly closed`, `broken pipe`, `readerindex`, `out of bounds`, `keepalive`, `bad packet`, `decoder`, `nullpointer`, `socket`, `at net.minecraft` |
+| **0** | `SONSTIGES` | alles übrige |
+
+Der Zusatz *"(Try restarting your game and the launcher)"* hängt bei Mojang an
+**jeder** Session-/Auth-Meldung dran, egal wie der Rest formuliert ist — deshalb
+ist er als eigenes Muster drin. Bewusst **nicht** nur `restart`: ein
+"Server is restarting" darf nicht als Session-Fehler gelten (per Test abgesichert).
+
+Kategorie 3 wird **zuerst** geprüft: ein Ban-Text, in dem zufällig auch
+`exception` steht, darf niemals einen Reconnect auslösen.
+
+#### Modus (`sessionFixMode`, Modul 23 SESSION MODE, Klick schaltet weiter)
+
+| Modus | reagiert auf | Gedacht für |
+|---|---|---|
+| `STRIKT` (0) | nur Kategorie 1 | konservativ, nur echte Session-Fehler |
+| `TECHNIK` (1, **Default**) | Kategorie 1 + 2 | Server, die auch Netty-/Exception-Kicks werfen |
+| `ALLES` (2) | Kategorie 0 + 1 + 2 | Server mit völlig unvorhersehbaren Meldungen |
+
+Kategorie 3 ist in **jedem** Modus ausgeschlossen.
+
+#### Ablauf
+
+Reconnect nach **5 s** (plus dem üblichen ±15-Tick-Jitter).
+Versuchsgrenze: **3** bei Kategorie 1, **5** bei allen anderen — ein wirklich
+toter Access-Token erholt sich nicht, ein Netzwerkfehler schon.
+`sessionFixAttempts` wird nach 60 Ticks stabiler Verbindung zurückgesetzt.
+Ist die Grenze erreicht, übernimmt der **normale Auto Reconnect** (falls aktiv)
+und probiert weiter — mit `Infinite` also endlos. Genau das braucht man beim
+AFK-Stehen. Der Hinweis bleibt sichtbar
+(`§cSession weiter ungültig – ggf. Client neu starten (Re-Auth).`).
+Ist Auto Reconnect aus, wird gestoppt und
+`§cSession dauerhaft ungültig – Client neu starten (Re-Auth nötig).` angezeigt.
+
+#### Re-Auth-Fenster (Zusammenspiel mit Re-Auth-Mods)
+
+Mods wie [Auto Reauth](https://modrinth.com/mod/auto-reauth) erneuern die Session
+genau dann, wenn der **Multiplayer-Screen** geöffnet wird. Krypton verbindet nach
+einem Kick aber direkt über `ConnectScreen` — der Check würde also nie laufen.
+Deshalb wird bei **Kategorie 1 (SESSION)** vor jedem Verbindungsversuch der
+Multiplayer-Screen gezeigt, bevor `doReconnect()` läuft
+(`pendingSessionReconnect`). Das Fenster wächst mit der Versuchszahl:
+`REAUTH_WINDOW_TICKS` (100 Ticks = 5 s) × Versuch, gedeckelt auf
+`REAUTH_WINDOW_MAX` (300 Ticks = 15 s) — ein Token-Refresh über das
+Microsoft-Login kann je nach Verbindung ein paar Sekunden dauern.
+Bei Kategorie 2 (TECHNIK) passiert das **nicht** — dort ist der Token ja in
+Ordnung. Ohne installierten Re-Auth-Mod kostet es nur diese Sekunden.
+
+**Alles läuft ohne Klick.** Countdown, Re-Auth-Fenster und Reconnect ticken von
+selbst weiter; der Knopf im `KryptonReconnectScreen` ist nur die Abkürzung. Das
+ist Absicht — der Client soll aus dem AFK-Betrieb allein zurückkommen.
+
+`doReconnect()` ist der **einzige** Verbindungspfad und steigt bei gesetztem
+`wasSafetyLogout` sofort aus — auch das Re-Auth-Fenster kann die Sperre nicht
+umgehen.
+
+**Hart gesperrt durch `wasSafetyLogout`** (§5.4.4) — das ist der ganze Grund für
+das eigene Modul: ein generischer "Reconnect bei Fehler" würde den Client nach
+dem Notfall-Logout wieder auf den Server holen, während der Gegner noch bei den
+abgebauten Spawnern steht.
+
+**`disconnectHandled`** sorgt dafür, dass der Handler pro Trennung genau einmal
+läuft. Ohne das Flag würde er jeden Tick erneut loggen und hochzählen, solange
+der Vanilla-`DisconnectedScreen` offen bleibt.
+
+#### Disconnect-Log
+
+Jede Trennung landet in `disconnectHistory` (max. 20 Einträge, persistiert in
+`krypton_disconnects.txt`):
+
+```
+§8[14:03:11] §6TECHNIK §8→ §fSession-Fix 1/5 §8| §7Internal Exception: io.netty...
+```
+
+Uhrzeit, erkannte Kategorie, tatsächlich ausgeführte Aktion und der Rohtext
+(`§` → `&` sichtbar gemacht, auf 110 Zeichen gekürzt). Anzeige über Modul 22
+**DISCONNECT LOG**, dort lässt sich der Modus auch direkt umschalten.
+Das ist die Grundlage, um auf einem konkreten Server den richtigen Modus zu
+wählen — statt zu raten, welche Meldungen überhaupt vorkommen.
+
+#### Was NICHT geht — und warum
+
+Ein **echtes Re-Auth** ist aus einem Fabric-Mod heraus nicht möglich: dafür
+bräuchte man den Microsoft-Refresh-Token, und den hat nur der Launcher.
+Clients wie NoRisk können das genau deshalb, weil sie *Launcher plus Client*
+sind. Mods, die es können, lassen sich den Token vom User geben und speichern
+ihn selbst — siehe
+[Auth Me](https://modrinth.com/mod/auth-me),
+[Auto Reauth](https://modrinth.com/mod/auto-reauth),
+[ReAuth](https://www.curseforge.com/minecraft/mc-mods/reauth-fabric).
+
+Krypton macht deshalb bewusst nur den Teil, der ohne Zugangsdaten sauber geht:
+den Abbruch erkennen, richtig einordnen und kontrolliert neu verbinden. Das
+behebt den häufigen Fall (Aussetzer des Mojang-Session-Servers, "already logged
+in", Rate-Limit, Netty-/Paketfehler). Ist der Access-Token wirklich tot, hilft
+nur ein Client-Neustart — und genau das sagt die Meldung dann auch.
+
+#### Testen
+
+Modul **SESSION TEST** (ClickGUI, Spalte MISC) trennt die Verbindung mit dem
+Grund `Invalid session (Try restarting your game and the launcher)`. Damit
+lässt sich der komplette Pfad ohne echten Serverkick prüfen — inklusive der
+Notfall-Logout-Sperre, die dabei ganz normal greift. Siehe §13.
 
 ---
 
@@ -484,10 +863,16 @@ unteren Rand. Header `§6Krypton`. Wird komplett ausgeblendet, wenn kein Modul
 aktiv ist. Angezeigte Einträge:
 
 ```
-Finder: §4<n>      Player ESP: §bON   Tracers: §bON
-Freecam: §aON      Fullbright: §eON   Guard: §eON
-Bones: §aON        Spawner ESP: §dON  Reconnect: §aON
+Finder: §4<n>                       Player ESP: §bON      Tracers: §bON
+Freecam: §aON                       Fullbright: §eON
+Guard: §eON §8[Menüs gesperrt]       ← §4EINSATZ statt ON, sobald guardEngaged
+Bones: §aON                         Spawner ESP: §dON     Reconnect: §aON
+Session Fix: §aON
+§4Rejoin gesperrt (Notfall-Logout)   ← nur wenn wasSafetyLogout gesetzt ist
 ```
+
+Der Zusatz `[Menüs gesperrt]` steht bewusst dort: sonst wundert man sich, warum
+ESC nichts tut (§5.4.3).
 
 ### 6.2 ClickGUI (`ClickGuiScreen`)
 
@@ -501,27 +886,39 @@ offen ist. `shouldPause()` gibt `false` zurück — das Spiel läuft weiter.
 
 | Spalte | Kategorie | Icon | Module (Indizes) |
 |---|---|---|---|
-| 0 | MISC | graues Plus `0xFF8B8FA8` | 0 Freecam, 10 Freecam Key, 3 Disable On Dmg |
+| 0 | MISC | graues Plus `0xFF8B8FA8` | 0 Freecam, 10 Freecam Key, 3 Disable On Dmg, 19 Staff Scan, 22 Disconnect Log, 20 Session Test, 21 Rejoin Lock |
 | 1 | BASEFINDING | cyan Diamant `0xFF44BBFF` | 4 Bedrock Finder, 12 Min Hole Size |
 | 2 | RENDER | lila Ring `0xFFAA55FF` | 5 Player ESP, 16 Tracers, 6 Spawner ESP, 7 Fullbright |
-| 3 | CLIENT | türkiser Stern `0xFF44CCFF` | 1 Auto Spawner, 2 Auto Reconnect, 11 Reconnect Set, 17 Whitelist, 8 Player Logs, 9 Logout Logs, 13 Bones Farm, 14 Bones Key, 15 Bones Drop |
+| 3 | CLIENT | türkiser Stern `0xFF44CCFF` | 1 Auto Spawner, 2 Auto Reconnect, 18 Session Fix, 23 Session Mode, 11 Reconnect Set, 17 Whitelist, 8 Player Logs, 9 Logout Logs, 13 Bones Farm, 14 Bones Key, 15 Bones Drop |
 
-**Modul-Indexliste (`MNAME`):**
+**Modul-Indexliste (`MNAME`, 24 Einträge):**
 ```
-0  FREECAM          6  SPAWNER ESP     12 MIN HOLE SIZE
-1  AUTO SPAWNER     7  FULLBRIGHT      13 BONES FARM
-2  AUTO RECONNECT   8  PLAYER LOGS     14 BONES KEY
-3  DISABLE ON DMG   9  LOGOUT LOGS     15 BONES DROP
-4  BEDROCK FINDER   10 FREECAM KEY     16 TRACERS
-5  PLAYER ESP       11 RECONNECT SET   17 WHITELIST
+0  FREECAM          6  SPAWNER ESP     12 MIN HOLE SIZE   18 SESSION FIX
+1  AUTO SPAWNER     7  FULLBRIGHT      13 BONES FARM      19 STAFF SCAN
+2  AUTO RECONNECT   8  PLAYER LOGS     14 BONES KEY       20 SESSION TEST
+3  DISABLE ON DMG   9  LOGOUT LOGS     15 BONES DROP      21 REJOIN LOCK
+4  BEDROCK FINDER   10 FREECAM KEY     16 TRACERS         22 DISCONNECT LOG
+5  PLAYER ESP       11 RECONNECT SET   17 WHITELIST       23 SESSION MODE
 ```
-Toggle-Module sind `mi < 8 || mi == 13 || mi == 16` — sie bekommen einen
-animierten Pill-Toggle (16×8 px, Thumb fährt 8 px). Alle anderen zeigen `>`,
-ein `[KEY]`-Label oder einen Inline-Zahlenwert.
+Toggle-Module sind `mi < 8 || mi == 13 || mi == 16 || mi == 18 || mi == 21` —
+sie bekommen einen animierten Pill-Toggle (16×8 px, Thumb fährt 8 px). Alle
+anderen zeigen `>`, ein `[KEY]`-Label oder einen Inline-Zahlenwert.
+
+**Die neuen Module:**
+
+| # | Name | Typ | Wirkung |
+|---|---|---|---|
+| 18 | SESSION FIX | Toggle | §5.11, persistiert in `krypton_cheats.txt` Zeile 6 |
+| 19 | STAFF SCAN | Screen | Rang-Diagnose, §6.3 |
+| 20 | SESSION TEST | Aktion | trennt mit `Invalid session (Try restarting your game and the launcher)` — Testpfad für §5.11 |
+| 21 | REJOIN LOCK | Toggle | zeigt/setzt `wasSafetyLogout` (`setSafetyLogout`). Der einzige Weg, die Notfall-Logout-Sperre ohne manuellen Join wieder zu lösen |
+| 22 | DISCONNECT LOG | Screen | letzte 20 Trenngründe mit Kategorie und Aktion, §6.3 |
+| 23 | SESSION MODE | Cycle | schaltet `sessionFixMode` STRIKT → TECHNIK → ALLES, zeigt `[TECHNIK]` rechts in der Zeile |
 
 **Animationen:** `openAnim` (0→1, `+0.10` pro Frame) steuert Overlay-Alpha und
-ein Slide-in von −24 px. `dotAnim[]` interpoliert die Toggle-Position mit
-`+= (target - current) * 0.22`.
+ein Slide-in von −24 px. `dotAnim[]` (Größe **24**) interpoliert die Toggle-Position mit
+`+= (target - current) * 0.22`. Die Indizes 0–7 laufen über eine Schleife,
+13/16/18/21 werden einzeln nachgezogen.
 
 **Input:** Maus-Klicks werden **nicht** über `mouseClicked()` verarbeitet,
 sondern per `GLFW.glfwGetMouseButton()`-Polling im `render()` mit
@@ -554,6 +951,8 @@ C_DASH     0xFF3A4050   C_ROW_HOV  0x14FFFFFF
 | `LogoutLogScreen` | Zeigt `lastLogoutLog`; "Log löschen" / "Zurück" |
 | `WhitelistScreen` | Liste mit Hover-Highlight, Klick = entfernen; Textfeld + "+" |
 | `HoleSizeScreen` | Eigenes Fenster für `minHoleSize` (1–100), Alternative zur Inline-Eingabe |
+| `DisconnectLogScreen` | Letzte 20 Trenngründe (`disconnectHistory`) mit Uhrzeit, Kategorie und ausgeführter Aktion; skaliert auf Breite **und** Höhe. Buttons: "Modus" (schaltet `sessionFixMode` weiter), "Log löschen", "Zurück". `shouldPause()` = `false`. |
+| `StaffScanScreen` | **Rang-Diagnose, zwei Ansichten.** *Glyphen:* zählt jedes Sonderzeichen aus allen Tab-/Team-Prefixes über alle sichtbaren Spieler, sortiert nach Häufigkeit, mit Codepoint, Hex-Farbe, Familie, Trefferzahl/Prozent und Urteil. Ein Symbol bei ≥50 % ist markiert als `<- DEKO!`, eines bei ≤2 Spielern als `<- verdächtig selten` (plus deren Namen). Das ist der Weg, den echten Rang-Marker zu finden. *Spieler:* Listet pro sichtbarem Spieler: Name, Distanz, Whitelist-Marker, Urteil (`STAFF: <Rang>` / `kein Staff`) und darunter je eine Zeile pro Quelle (Tab, Name, Team-Prefix, Team-Suffix) mit dem Rohtext (`§` → `&` sichtbar gemacht) und jedem gefundenen Stern als `U+XXXX #RRGGBB <Familie> [STAFF]/[egal]`. 15 Zeilen pro Seite, `<`/`>` blättert, "Aktualisieren" scannt neu. Fünf Schalter (Grün/Blau/Lila/Andere/Text) ändern die Erkennung sofort und speichern nach `krypton_staffdetect.txt`. `shouldPause()` = `false`. |
 
 ---
 
@@ -571,31 +970,48 @@ Alle Dateien liegen im **Arbeitsverzeichnis** des Spiels (`run/` im Dev,
 | `krypton_guikey.txt` | GUI-Keycode | `loadGuiKey` / `saveGuiKey` |
 | `krypton_fullbright.txt` | `true`/`false` | `loadFullbright` / `saveFullbright` |
 | `krypton_freecam_settings.txt` | `disableFreecamOnDamage` | `loadFreecamSettings` / `saveFreecamSettings` |
-| `krypton_cheats.txt` | 5 Zeilen: BedrockFinder, PlayerESP, AutoSpawner, SpawnerESP, Tracers | `loadCheatStates` / `saveCheatStates` |
+| `krypton_cheats.txt` | 7 Zeilen: BedrockFinder, PlayerESP, AutoSpawner, SpawnerESP, Tracers, **SessionFix**, **SessionFixMode** (0–2) | `loadCheatStates` / `saveCheatStates` |
 | `krypton_reconnect.txt` | Z1 aktiv, Z2 infinite, Z3 Delays (CSV) | `loadReconnect` / `saveReconnect` |
 | `krypton_bfkey.txt` | Bones-Farmer-Keycode | `loadBonesFarmerKey` / `saveBonesFarmerKey` |
 | `krypton_bfdrop.txt` | `bonesFarmerDropBase` (1–99) | `loadDropBase` / `saveDropBase` |
 | `krypton_discord_id.txt` | letzte verarbeitete Discord-Message-ID | `loadDiscordConfig` / `saveLastDiscordMessageId` |
+| `krypton_safelogout.txt` | `wasSafetyLogout` (`true`/`false`) — Notfall-Logout-Sperre | `loadSafetyLogout` / `setSafetyLogout` |
+| `krypton_staffglyphs.txt` | zusätzliche Stern-Codepoints, einer pro Zeile (`U+E001`) | `loadStaffGlyphs` / `saveStaffGlyphs` |
+| `krypton_staffdetect.txt` | `green=`/`blue=`/`purple=`/`other=`/`text=` (je `true`/`false`) | `loadStaffDetect` / `saveStaffDetect` |
+| `krypton_disconnects.txt` | letzte 20 Trenngründe, eine Zeile pro Eintrag | `loadDisconnectLog` / `saveDisconnectLog` |
 
 **Nicht persistiert:** `isFreecamActive`, `isBonesFarmerActive`, `minHoleSize`,
-`spawnerScriptActive`.
-`saveCheatStates()` wird nur bei `CLIENT_STOPPING` aufgerufen, alle anderen
-Saves laufen sofort bei der Änderung.
+`spawnerScriptActive`, `guardEngaged`, `sneakSuppressTicks`.
+
+`saveCheatStates()` wird bei `CLIENT_STOPPING` **und** beim Umschalten von
+Session Fix aufgerufen; alle anderen Saves laufen sofort bei der Änderung.
+`setSafetyLogout()` ist der **einzige** Schreibpfad für `wasSafetyLogout` —
+Wert und Datei können damit nicht auseinanderlaufen.
+
+**Ältere `krypton_cheats.txt` bleiben lesbar:** fehlende Zeilen lassen
+`isSessionFixActive` (`false`) und `sessionFixMode` (`1` = TECHNIK) auf ihren
+Defaults. `sessionFixMode` wird zusätzlich auf 0–2 validiert.
 
 ---
 
 ## 8. Mixins
 
-Alle in `krypton.mixins.json` unter `"client"` registriert,
+In `krypton.mixins.json` unter `"client"` registriert,
 `compatibilityLevel: JAVA_21`, `defaultRequire: 1`.
+
+> **Achtung:** `ExampleMixin` ist **nicht** registriert — die Datei liegt nur
+> noch im Quellbaum herum und wird nie geladen. Sie steht unten nur der
+> Vollständigkeit halber in der Tabelle.
 
 | Mixin | Ziel | Injection | Zweck |
 |---|---|---|---|
 | `CameraMixin` | `Camera` | `update` @TAIL | Setzt in Freecam Kamera-Position und -Rotation. Interpoliert `prev*` → aktuell mit `getTickProgress(true)` (sonst wirkt die Kamera wie 20 FPS). Friert zusätzlich jeden **Frame** Yaw/Pitch/HeadYaw/BodyYaw des Spielers ein und überschreibt damit den Vanilla-Maus-Handler vollständig. |
 | `EntityMixin` | `Entity` | `changeLookDirection` @HEAD, cancellable | Leitet in Freecam die Mausbewegung auf `freecamYaw/freecamPitch` um (`delta * 0.15`, Pitch auf ±90° geklemmt) und cancelt den Vanilla-Pfad. Nur für `MinecraftClient.getInstance().player`. |
 | `GameRendererMixin` | `GameRenderer` | `renderHand` @HEAD, cancellable | Blendet die Hand/das Item in Freecam aus. Parameter bewusst weggelassen → robust gegen Mapping-Änderungen. |
-| `KeyboardInputMixin` | `KeyboardInput` | `tick` @TAIL | Überschreibt in Freecam `input.playerInput` mit einem leeren `PlayerInput` → der Spielerkörper bewegt sich nicht mit. |
-| `MinecraftClientMixin` | `MinecraftClient` | `handleBlockBreaking` @HEAD, cancellable | Unterdrückt in Freecam das Vanilla-Mining komplett. **Grund:** Vanilla nutzt `crosshairTarget` (= Freecam-Blickrichtung), unser Code bricht aber in `savedYaw/savedPitch`-Richtung ab. Beide zusammen cancellen sich gegenseitig → Progress startet endlos neu → Server-Desync und zurückbuggende Blöcke. |
+| `KeyboardInputMixin` | `KeyboardInput` | `tick` @TAIL | Überschreibt in Freecam `input.playerInput` mit einem leeren `PlayerInput` → der Spielerkörper bewegt sich nicht mit. **Ausnahme Sneak:** läuft der Dauer-Sneak des Guards (`shouldForceSneak()`), bleibt die Sneak-Komponente `true` — der Körper duckt sich weiter, bewegt sich aber nicht. Komponenten-Reihenfolge von `PlayerInput`: `forward, backward, left, right, jump, sneak, sprint`. |
+| `MinecraftClientMixin` | `MinecraftClient` | `handleBlockBreaking` @HEAD, cancellable | Unterdrückt das Vanilla-Mining, wenn **Freecam** *oder* **`Krypton.guardIsMining()`** aktiv ist. **Grund:** Vanilla nutzt `crosshairTarget`, unsere beiden eigenen Abbau-Pfade nutzen einen eigenen Raycast. Beide zusammen cancellen sich gegenseitig → Progress startet endlos neu → Server-Desync und zurückbuggende Blöcke. Siehe §5.4.1. |
+| `MinecraftClientMixin` | `MinecraftClient` | `openGameMenu(boolean)` @HEAD, cancellable | Blockt das Pausenmenü bei `Krypton.guardLockActive()`. Das ist der **einzige** Vanilla-Einstieg ins `GameMenuScreen` — deckt ESC *und* "Pause on Lost Focus" beim Fensterwechsel ab. |
+| `MinecraftClientMixin` | `MinecraftClient` | `setScreen(Screen)` @HEAD, cancellable | Zweite Verteidigungslinie: cancelt, wenn `Krypton.isScreenBlocked(screen)` — unabhängig davon, über welchen Codepfad der Screen geöffnet wird. Blocklist statt Allowlist, siehe §5.4.3. |
 | `PerspectiveMixin` | `Perspective` | `isFirstPerson` @HEAD, cancellable | Gibt in Freecam immer `false` zurück. Umgeht den "skip local player in first-person"-Check im `WorldRenderer`, sodass der eigene Spieler sichtbar bleibt — **ohne** die Perspective-Option tatsächlich zu ändern. |
 | `SimpleOptionMixin` | `SimpleOption` | `getValue` @HEAD, cancellable | Fullbright: gibt für `options.getGamma()` den Wert `100.0` zurück, wenn `isFullbrightActive`. Identitätsvergleich `(Object) this == gammaOption`. |
 | `WorldRendererMixin` | `WorldRenderer` | `isRenderingReady` @HEAD, cancellable | Gibt in Freecam immer `true` zurück → Chunks werden nicht ausgeblendet, wenn man durch Wände fliegt. |
@@ -614,6 +1030,19 @@ step -= step % gcd;
 ```
 Wird in Auto Spawner (State 2 + 5), Bones Farmer (State 2) und Spawner Script
 (State 2 + 3) verwendet.
+
+### 9.1b Vanilla-Gates umgehen statt bekämpfen
+Wenn Vanilla eine Aktion an einen UI-Zustand koppelt (offener Screen, Cursor-Lock,
+Fensterfokus), ist der stabile Weg: **den Vanilla-Pfad canceln und die Aktion
+selbst ausführen**, nicht beides parallel laufen lassen. Beide Pfade gleichzeitig
+enden sonst in `cancelBlockBreaking()`-Schleifen und Server-Desync.
+Angewandt bei Freecam-Abbau und Guard-Abbau (§5.4.1), jeweils zusammen mit einem
+eigenen Raycast, damit die verschickten Pakete serverkonform bleiben.
+
+### 9.1c Farberkennung über Hue statt fester RGB-Werte
+Server verwenden für dieselbe "Farbe" mal die 16 Vanilla-Codes, mal beliebige
+Hex-Werte. `starColorFamily()` rechnet deshalb nach HSV um und ordnet über den
+Farbton zu, mit einer Sättigungsschwelle gegen Weiß/Grau. Siehe §5.10.
 
 ### 9.2 Reflection
 Wird an fünf Stellen eingesetzt, um Mapping-Änderungen zu überleben:
@@ -648,6 +1077,15 @@ Server-GUIs werden nicht über feste Slot-Indizes, sondern über Inhalt erkannt:
 - Reconnect-Delays mit ±15-Tick-Jitter
 - `snapCursorToSlot()` bewegt den echten OS-Cursor mit ±3 px Jitter auf den Slot
 - Automatisches Abschalten bei erkanntem Staff (Guard **und** Bones Farmer)
+
+### 9.4b Sneak und Block-Interaktion schließen sich aus
+`ServerPlayerInteractionManager.interactBlock()` prüft
+`player.shouldCancelInteraction()` (= `isSneaking()`) und ruft dann statt
+`BlockState.onUse()` das `useOnBlock()` des Items auf. Ein sneakender Spieler
+bekommt also **keine** Block-GUI — und setzt mit einem Block in der Hand
+stattdessen einen Block. Jeder automatisierte Rechtsklick auf einen Block muss
+den Dauer-Sneak deshalb vorher abmelden (`suppressSneak()`) und warten, bis
+`isSneakReleased()` true ist. Siehe §5.4.2.
 
 ### 9.5 Thread-Sicherheit
 - `playerHistory` und `stableHoles` sind `CopyOnWriteArrayList`
@@ -698,7 +1136,7 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
 ### Code-Qualität
 - **Alle** `try/catch` in den Persistenz-Methoden schlucken Exceptions
   kommentarlos — Fehler beim Laden/Speichern sind unsichtbar.
-- `Krypton.java` ist mit ~2965 Zeilen ein Monolith aus `static`-State.
+- `Krypton.java` ist mit ~3850 Zeilen ein Monolith aus `static`-State.
   Eine Aufteilung in Module/Manager wäre der naheliegende nächste Refactor-Schritt.
 - Discord-JSON wird per `indexOf`/`substring` geparst — bricht, sobald das
   Antwortformat oder die Feldreihenfolge sich ändert.
@@ -707,7 +1145,8 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
 - `setGamePerspective()` ist toter Code seit dem `PerspectiveMixin`.
 - `modRightClick()` ist leer.
 - `bonesFarmerLoggedSlots` wird gesetzt, aber nie ausgewertet.
-- `ExampleMixin` ist ein leerer Template-Rest.
+- `ExampleMixin` ist ein leerer Template-Rest und in `krypton.mixins.json`
+  gar nicht registriert — die Datei kann ersatzlos weg.
 - `arrowsBeforeSpawner` wird im Bones Farmer als Bone-Zähler zweckentfremdet —
   der Name stammt noch aus einer früheren Version.
 - `Runtime.getRuntime().halt(1)` in State 10 des Spawner-Scripts beendet die JVM
@@ -721,7 +1160,19 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
 - `.claude/launch.json` enthält Preview-Configs aus einem **anderen** Projekt
   (`gastroenterologie-gropiusstadt`, `lusion-clone`) und hat mit Krypton nichts zu tun.
 - `depends.minecraft` steht auf `>=1.21.1`, gebaut wird aber gegen `1.21.11` —
-  die Range ist weiter, als der Code tatsächlich unterstützt.
+  die Range ist weiter, als der Code tatsächlich unterstützt. Dasselbe gilt für
+  `depends.fabricloader` (`>=0.18.1` vs. `loader_version=0.19.2`).
+
+### Build-Umgebung
+- `gradlew` hatte im Git kein Execute-Bit (`100644`). Die CI setzt es selbst
+  (`chmod +x ./gradlew`), lokal schlug `./gradlew` aber mit
+  *Permission denied* fehl. Ist jetzt auf `100755` korrigiert.
+- Ein Build braucht Netzzugriff auf **`maven.fabricmc.net`** (Loom-Plugin,
+  Yarn, Loader, Fabric API). In abgeschotteten Umgebungen ohne diesen Host ist
+  kein lokaler Build möglich — dann bleibt nur die GitHub-Actions-CI.
+  Zum Gegenprüfen von Mappings ohne Build helfen die Yarn-Mapping-Dateien
+  direkt aus dem Repo, z. B.
+  `https://raw.githubusercontent.com/FabricMC/yarn/1.21.11/mappings/net/minecraft/client/MinecraftClient.mapping`.
 
 ### Versions-Fallstricke (1.21.11)
 - **Linien-Rendering** braucht pro Vertex zwingend `.lineWidth(...)`, sonst
@@ -732,6 +1183,15 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
 - `KeyInput`-Record statt `int keyCode, int scanCode, int modifiers` in
   `Screen.keyPressed`.
 - `PlayerInventory.setSelectedSlot(int)` statt direktem Feldzugriff.
+- `PlayerInput` ist ein **Record** mit sieben `boolean`-Komponenten in der
+  Reihenfolge `forward, backward, left, right, jump, sneak, sprint`. In den
+  Yarn-Mappings ist nur `sneak` benannt, die übrigen Komponenten behalten
+  Intermediary-Namen — beim Konstruieren also auf die Position achten.
+- `InputUtil.isKeyPressed(Window, int)` nimmt ein `Window`, **keinen** `long`
+  Fenster-Handle.
+- `Text.visit(StringVisitable.StyledVisitor<T>, Style)` liefert den **gemergten**
+  Style pro Textabschnitt — der richtige Weg, um an Farben zu kommen, statt
+  `getString()` zu parsen (dabei gehen Component-Farben verloren).
 
 ---
 
@@ -748,11 +1208,136 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
   in `MNAME`, einen Index in `MODS`, Cases in `modOn()`/`modToggle()`,
   ggf. `dotAnim`-Handling, einen HUD-Eintrag und — falls persistent — ein
   Load/Save-Paar plus Aufruf in `onInitialize()`.
-  `dotAnim` ist auf **17** Einträge dimensioniert; bei Index ≥ 17 muss das
-  Array vergrößert werden.
+  `dotAnim` ist auf **22** Einträge dimensioniert; bei Index ≥ 22 muss das
+  Array vergrößert werden. Toggle-Module brauchen zusätzlich einen Eintrag in
+  der `isToggle`-Bedingung **und** eine eigene `dotAnim[i] += …`-Zeile
+  (die Schleife deckt nur 0–7 ab).
 - **Renderer** immer mit NaN/Infinity-Guards und `ArrayList`-Snapshots arbeiten.
 - **Mapping-Unsicherheit:** Bei unklaren Yarn-Namen ist `javap` gegen das
   gemergte Minecraft-Jar im Loom-Cache der schnellste Weg (siehe die
   entsprechenden Einträge in `.claude/settings.local.json`).
 - **Vor dem Commit:** `./gradlew build` muss durchlaufen; die CI baut mit JDK 25
-  gegen Release-Target 21.
+  gegen Release-Target 21. Geht das lokal nicht (kein Zugriff auf
+  `maven.fabricmc.net`, siehe §11), zumindest `javac` über die Quellen laufen
+  lassen — Syntaxfehler fallen dabei auf, auch wenn alle MC-Symbole fehlen —
+  und danach den CI-Build auf GitHub abwarten.
+- **Guard-Änderungen sind sicherheitskritisch.** Beim Anfassen von §5.4 immer
+  mitdenken: Kann noch abgebaut werden, wenn ein Screen offen ist / das Fenster
+  keinen Fokus hat? Kann sich der User den Guard noch ausschalten? Bleibt der
+  Notfall-Logout-Rejoin gesperrt? Und wird der Auto-Sneak für jeden
+  Rechtsklick auf einen Block abgemeldet (§9.4b)?
+- **Staff-Erkennung nie "auf Verdacht" ändern.** Erst den Staff-Scan-Screen
+  (§6.3) am echten Server aufmachen und sehen, was ankommt — beide
+  Fehlerrichtungen sind teuer (§5.10).
+
+---
+
+## 13. Testen der sicherheitskritischen Pfade
+
+Die Guard- und Reconnect-Logik lässt sich nicht sinnvoll durch Zuschauen prüfen.
+Diese vier Tests decken die kritischen Pfade ab.
+
+### 13.1 Menü-Sperre und Abbau-Garantie
+1. Guard einschalten (ClickGUI → CLIENT → AUTO SPAWNER). HUD muss
+   `Guard: ON [Menüs gesperrt]` zeigen.
+2. **ESC drücken** → es darf sich nichts öffnen.
+3. **T / Chat-Taste, E (Inventar), F3+…** → nichts öffnet sich.
+4. **Alt-Tab** (bzw. Remote-Desktop trennen) → beim Zurückkommen darf **kein**
+   Pausenmenü offen sein und der Mauszeiger muss wieder gegriffen sein.
+5. ClickGUI-Taste (Default `RIGHT_SHIFT`) muss weiterhin funktionieren —
+   das ist der Not-Aus.
+
+### 13.2 Auto-Sneak
+1. Guard einschalten. Der Spieler muss **sofort und dauerhaft** ducken
+   (in F5-Perspektive gut zu sehen).
+2. Sneak-Taste drücken **und wieder loslassen** → der Spieler bleibt geduckt,
+   ohne dass es einmal kurz aufspringt.
+3. Guard ausschalten, **währenddessen Shift gedrückt halten** → der Spieler
+   bleibt geduckt (echter Tastenzustand wurde übernommen). Loslassen → steht auf.
+4. Guard aus **ohne** Shift → der Spieler steht sofort auf (kein hängender Key).
+5. Mit Guard an einen Spawner rechtsklicken (Bones Farmer) → die GUI muss
+   **trotzdem aufgehen** (§9.4b). Geht sie nicht auf, greift die
+   Sneak-Unterdrückung nicht.
+
+### 13.3 Session-Fix
+1. Modul **SESSION FIX** einschalten (ClickGUI → CLIENT). Modus steht auf
+   `TECHNIK` (Modul **SESSION MODE** daneben zeigt `[TECHNIK]`).
+2. Auf einem Server einloggen, dann ClickGUI → MISC → **SESSION TEST**.
+   Der Client trennt mit `Invalid session (Try restarting your game and the
+   launcher)`.
+3. Erwartet: eigener Reconnect-Screen mit
+   `§eSession-Fix (SESSION) – Versuch 1/3`, Countdown ~5 s, dann automatischer
+   Rejoin.
+4. Dreimal wiederholen, **ohne** dass die Verbindung 60 Ticks (3 s) hält → beim
+   vierten Mal muss `Session dauerhaft ungültig – Client neu starten` stehen
+   und **kein** automatischer Reconnect mehr kommen.
+5. Gegenprobe ohne Modul: SESSION FIX aus → SESSION TEST → es greift nur der
+   normale Auto Reconnect (bzw. gar nichts, wenn der aus ist).
+
+**Echte Server-Kicks prüfen (der wichtigere Teil).** Der Testknopf schickt immer
+denselben Text; die echten Meldungen auf einem Plugin-Server sehen anders aus.
+Dafür gibt es das **DISCONNECT LOG** (ClickGUI → MISC):
+1. Normal spielen. Bei jedem Rausflug wird eine Zeile geschrieben:
+   `[Uhrzeit] KATEGORIE → Aktion | Rohtext`.
+2. Nach ein paar Tagen dort nachsehen:
+   - Steht bei den Bug-Kicks `SESSION` oder `TECHNIK`? → passt, Modus `TECHNIK`
+     genügt.
+   - Steht dort `SONSTIGES`? → der Server verwendet eine Formulierung, die noch
+     in keiner Musterliste steht. Entweder Modus auf `ALLES` stellen, oder den
+     Rohtext aus dem Log nehmen und ein passendes Muster in
+     `TECHNICAL_KICK_PATTERNS` nachtragen.
+   - Steht bei einem echten Ban/Kick `KEIN-REJOIN`? → gut. Steht dort etwas
+     anderes, gehört ein Muster in `NEVER_RECONNECT_PATTERNS`, **bevor** man
+     Modus `ALLES` benutzt.
+3. Der Modus lässt sich direkt im Disconnect-Log-Screen umschalten.
+
+Wer einen eigenen Testserver hat, kann Kick-Texte auch gezielt durchspielen:
+`/kick <Name> Invalid session (Try restarting your game and the launcher)`,
+`/kick <Name> Internal Exception: io.netty.handler.timeout.ReadTimeoutException`,
+`/ban <Name> test` (muss `KEIN-REJOIN` ergeben und **darf nicht** rejoinen).
+
+### 13.4 Notfall-Logout darf NIE rejoinen — der wichtigste Test
+
+**Schnelltest ohne zweiten Account** (prüft nur die Sperre, nicht den Abbau):
+1. Auf einem Server einloggen.
+2. ClickGUI → MISC → **REJOIN LOCK** einschalten. HUD zeigt
+   `§4Rejoin gesperrt (Notfall-Logout)`, `krypton_safelogout.txt` enthält `true`.
+3. AUTO RECONNECT **und** SESSION FIX einschalten (beide sollen ja geblockt werden).
+4. ClickGUI → MISC → **SESSION TEST**.
+5. Erwartet: `§4Notfall-Logout aktiv – Auto-Reconnect gesperrt`,
+   Reconnect-Button **ausgegraut**, **kein** automatischer Rejoin — auch nach
+   Minuten nicht.
+6. Client komplett neu starten → `krypton_safelogout.txt` steht immer noch auf
+   `true`, HUD zeigt die Sperre weiter. Ein erneuter Disconnect rejoint nicht.
+7. Manuell auf den Server verbinden und **3 Sekunden dort bleiben** → die Sperre
+   fällt automatisch, HUD-Zeile verschwindet, Datei steht auf `false`.
+
+**Vollständiger Test mit zweitem Account:**
+1. Zweiten Account (nicht in der Whitelist, kein Staff-Stern) besorgen.
+2. Guard einschalten, neben einem eigenen Spawner stehen, Spitzhacke mit
+   Behutsamkeit in der Hotbar.
+3. Mit dem zweiten Account auf **unter 40 Blöcke** herangehen.
+4. Erwartet: Guard dreht sich auf den Spawner, baut ihn ab, und trennt danach
+   mit `§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout.`
+5. **Danach darf nichts mehr passieren** — kein Countdown, kein Rejoin.
+   `krypton_safelogout.txt` = `true`, LOGOUT LOGS enthält den Eintrag mit Name,
+   Distanz und Koordinaten.
+
+### 13.5 Staff-Erkennung (Stern-Ranks)
+1. ClickGUI → MISC → **STAFF SCAN** öffnen, während Staff und normale Spieler
+   online sind.
+2. Für jeden Spieler prüfen:
+   - Zeigt eine der Quellzeilen (Tab / Name / Team-Prefix / Team-Suffix)
+     überhaupt einen Stern (`U+XXXX`)?
+   - Stimmt die Hex-Farbe mit dem überein, was man im Tab sieht?
+   - Ist die abgeleitete Familie richtig (`Mod/Admin`, `Helper/Owner`,
+     `Developer`) und mit `[STAFF]` markiert?
+3. **Normale Spieler dürfen nirgends `[STAFF]` bekommen.** Passiert das doch
+   (z. B. weil Spender auch Sterne haben), die betroffene Farbfamilie unten im
+   Screen abschalten.
+4. Wird Staff **nicht** erkannt: prüfen, ob die Sternfarbe in eine andere
+   Familie fällt — dann `Andere` einschalten — oder ob der Glyph gar nicht in
+   `STAR_GLYPHS` steht. Der angezeigte Codepoint `U+XXXX` sagt genau, welcher
+   es ist; er lässt sich direkt in die Konstante nachtragen.
+5. Die Einstellungen landen sofort in `krypton_staffdetect.txt` und überleben
+   den Neustart.
