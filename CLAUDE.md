@@ -10,7 +10,7 @@ Kontext-Referenz für Claude Code und für jeden Entwickler, der am Projekt arbe
 **Krypton** ist ein Minecraft-Utility-/Cheat-Client, gebaut als **Fabric Mod** für
 **Minecraft 1.21.11**. Der Client bietet ein eigenes ClickGUI, Render-Module (ESP,
 Tracers, Fullbright), eine Freecam, mehrere Automatisierungs-Bots (Auto Spawner,
-Bones Farmer, Discord-gesteuertes Spawner-Script), Player-Logging/Radar,
+Discord-gesteuertes Spawner-Script), Player-Logging/Radar,
 Auto-Reconnect und einen Bedrock-Hohlraum-Finder ("Basefinding").
 
 | Eigenschaft | Wert |
@@ -88,12 +88,11 @@ Reihenfolge beim Client-Start:
 
 1. **Alle Settings laden** — `loadWhitelist()`, `loadKeybind()`, `loadFullbright()`,
    `loadReconnect()`, `loadGuiKey()`, `loadFreecamSettings()`, `loadLogs()`,
-   `loadCheatStates()`, `loadBonesFarmerKey()`, `loadDropBase()`, `loadDiscordConfig()`,
+   `loadCheatStates()`, `loadDiscordConfig()`,
    `loadSafetyLogout()`, `loadStaffDetect()`, `loadDisconnectLog()`.
 2. **Keybinds registrieren** über `KeyBindingHelper` (Kategorie `MISC`):
    - `key.krypton.gui` — Default `RIGHT_SHIFT`, überschrieben von `lastSavedGuiKey`
    - `key.krypton.freecam` — Default aus `freecamKey` (Fallback `V`)
-   - `key.krypton.bonesfarmer` — Default aus `bonesFarmerHotkey` (Fallback `UNKNOWN`)
 3. **`ClientLifecycleEvents.CLIENT_STOPPING`** → `saveCheatStates()`
 3b. **`ClientTickEvents.START_CLIENT_TICK`** → `applyForceSneak()` (Auto-Sneak des
    Spawner-Schutzes, siehe §5.4.2). Bewusst **START** und nicht END: der Handler
@@ -101,8 +100,6 @@ Reihenfolge beim Client-Start:
    `world.tickEntities()` → `KeyboardInput.tick()`. Würde man den Sneak erst in
    `END_CLIENT_TICK` setzen, gäbe es beim Loslassen der echten Sneak-Taste jedes
    Mal einen Tick ohne Sneak und damit ein `STOP_SNEAKING`/`START_SNEAKING`-Paketpaar.
-4. **Chat-Listener** (`ClientReceiveMessageEvents.CHAT` + `.GAME`) für die
-   Bones-Farmer-Delivery-Erkennung
 5. **Interaktions-Callbacks** (`AttackBlock`, `AttackEntity`, `UseBlock`,
    `UseEntity`, `UseItem`) → in Freecam alles `FAIL`, außer `isManualInteraction`
 6. **`ClientTickEvents.END_CLIENT_TICK`** → der große Haupt-Tick (siehe §4)
@@ -115,7 +112,7 @@ Reihenfolge beim Client-Start:
 
 1. **GUI-Key Auto-Backup** — liest per Reflection das nicht-finale `InputUtil.Key`
    Feld aus `openGuiKey`; bei Änderung → `saveGuiKey()`.
-2. **Keybind-Sync** — `getBoundKeyCode()` für Freecam- und BonesFarmer-Binding;
+2. **Keybind-Sync** — `getBoundKeyCode()` für das Freecam-Binding;
    bei Abweichung → Feld aktualisieren + speichern. So werden Änderungen aus den
    Vanilla-Controls übernommen.
 3. **Server-Tracking** — `lastServer = client.getCurrentServerEntry()`.
@@ -135,16 +132,15 @@ Reihenfolge beim Client-Start:
    ist (siehe §5.4.1).
 6. **Discord-Poll** — alle 100 Ticks (5 s) `pollDiscordAsync()`; Trigger-Flag
    vom Background-Thread wird übernommen (`spawnerScriptState = 1`).
-7. **Keybind-Handling** — GUI öffnen, Freecam togglen, Bones Farmer togglen.
+7. **Keybind-Handling** — GUI öffnen, Freecam togglen.
 8. **Freecam-Tick** — siehe §5.1.
 9. **Radar-Logging** — siehe §5.8.
 10. **Spawner-Scan** — alle 20 Ticks, wenn Spawner-ESP / AutoSpawner /
-    BonesFarmer / SpawnerScript aktiv ist. Iteriert über alle Chunks im
+    SpawnerScript aktiv ist. Iteriert über alle Chunks im
     Render-Distance-Quadrat und liest `chunk.getBlockEntities()` (O(n) über
     BlockEntities, **nicht** über alle Blöcke) und filtert
     `MobSpawnerBlockEntity` → `foundSpawners`.
 11. **Auto-Spawner-Logik** — siehe §5.4.
-12. **`tickBonesFarmer(client)`** — siehe §5.5.
 13. **`tickSpawnerScript(client)`** — siehe §5.6.
 14. **Bedrock-Finder-Scan** — siehe §5.3.
 
@@ -262,6 +258,10 @@ alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
 
 **Bedingungen:** aktiv, Welt und Spieler vorhanden, **nicht** in Freecam.
 
+**Einschalten über das ClickGUI (Modul 1) schaltet automatisch mit ein:** Auto Reconnect,
+Session Fix und Infinite — und speichert sie. Guard an bedeutet AFK-Betrieb; ohne
+Reconnect stünde der Client nach dem ersten Kick im Menü, bis jemand hinschaut.
+
 **Spielererkennung** (Distanz² < 1600, also 40 Blöcke):
 - Whitelist-Spieler werden übersprungen.
 - **Staff erkannt** (`getPlayerRank()` liefert nicht-leer) → Guard schaltet sich
@@ -271,7 +271,7 @@ alle Spawner in der Nähe abgebaut und der Client loggt sich aus.
   (`lastLogoutLog` mit Uhrzeit, Name, Distanz, XYZ) und gespeichert.
 
 **`guardEngaged`** (`enemyFound || hasMinedSpawner`) markiert den Notfall-Modus.
-Solange er läuft, hat der Abbau absoluten Vorrang: der Bones Farmer pausiert und
+Solange er läuft, hat der Abbau absoluten Vorrang:
 vom Server geöffnete GUIs werden geschlossen.
 
 **Spawner-Suche:** `findReachableSpawner()` — 9×9×9 Würfel um den Spieler,
@@ -410,9 +410,7 @@ darum für jeden Rechtsklick auf einen Block kurz abmelden:
 - `suppressSneak(ticks)` setzt das Fenster,
 - `isSneakReleased(client)` prüft, ob der Sneak serverseitig wirklich weg ist.
 
-Angemeldet ist das an zwei Stellen:
-- **Bones Farmer State 3** (Rechtsklick auf den Spawner): meldet ab, wartet
-  2 Ticks, klickt erst wenn `isSneakReleased()` true ist.
+Angemeldet ist das an einer Stelle:
 - **Freecam-Rechtsklick**: meldet ab, solange die rechte Maustaste hängt.
 
 **Was Sneak in Vanilla wirklich tut** (damit die Erwartung stimmt): Sneaken
@@ -441,7 +439,7 @@ der Client festfahren):
 - `null` (Schließen geht immer)
 - alle `com.krypton.*`-Screens → das ClickGUI bleibt der Weg, den Guard
   wieder auszuschalten
-- alle übrigen `HandledScreen`s (Server-GUIs, die der Bones Farmer braucht)
+- alle übrigen `HandledScreen`s (Server-GUIs)
 - `SleepingChatScreen` (deshalb der exakte `getClass()`-Vergleich beim Chat) —
   sonst läge der Spieler ohne UI im Bett fest
 - Disconnect-, Tod-, Lade- und Ressourcenpack-Screens
@@ -471,55 +469,6 @@ stabil hält (§4, Punkt 3).
 
 **Persistenz:** `isAutoSpawnerActive` in `krypton_cheats.txt` (Zeile 3),
 `wasSafetyLogout` in `krypton_safelogout.txt`.
-
-### 5.5 Bones Farmer (`isBonesFarmerActive`)
-
-Server-spezifischer Farm-Bot (zugeschnitten auf einen Server mit gestackten
-Spawnern, GUI-Loot und einem `/order`-Delivery-System).
-
-**Toggle:** eigener Hotkey (`bonesFarmerHotkey`, Default `UNKNOWN` = ungebunden)
-oder GUI-Modul 13. Wird bei Freecam pausiert. Bei **Staff in der Nähe**
-(`isStaffNearby()`) schaltet er sich sofort ab und schließt offene GUIs.
-
-**State-Machine `bonesFarmerState`** (alle Delays randomisiert):
-
-| State | Beschreibung |
-|---|---|
-| 0 | IDLE — wartet bis kein Screen offen ist |
-| 1 | Nächsten Spawner aus `foundSpawners` in Distanz² ≤ 25 wählen; `dropLootClicksTarget = bonesFarmerDropBase ± 2` |
-| 2 | Auf den Spawner drehen — GCD-Snapping + variable Geschwindigkeit (0.28–0.50) + Micro-Jitter (±1.5·gcd); Recovery: hängende Screens werden geschlossen |
-| 3 | Rechtsklick per echtem Raycast; trifft der Raycast nicht den Ziel-Spawner → zurück zu State 2 |
-| 4 | Warten bis die Spawner-GUI offen ist und `findDropButton()` in der letzten Slot-Reihe etwas findet; Timeout 40 Ticks |
-| 5 | "Drop Loot" klicken. Vorher `hasArrowInSpawnerGui()` — ist ein Arrow im Loot-Bereich, wird abgebrochen. Nach jedem Klick leichter Yaw/Pitch-Jitter |
-| 7 | "Next"-Button klicken, dann zurück zu State 5 |
-| 10 | Spawner-GUI schließen |
-| 20 | `countBonesInInventory()`; bei 0 → `bonesFarmerEmptyCycles++`, nach **2** leeren Zyklen schaltet sich der Bot ab. Sonst `/order bones` senden |
-| 21 | Warten auf die GUI mit "deliver" im Titel; Timeout 400 Ticks |
-| 22 | Bones einliefern — **ein** Bone-Slot pro 2 Ticks per `QUICK_MOVE` (~10 Klicks/s statt 80), Cursor wird via `snapCursorToSlot()` auf den ersten bewegt. Enthält Chest-Voll-, Drop-, Stall- und Delivery-Timer-Detection (siehe unten) |
-| 23 | Delivery-GUI schließen (Server öffnet daraufhin den Confirm-Dialog) |
-| 24 | Warten auf Screen mit "confirm"/"bestätig" im Titel; Timeout 100 Ticks |
-| 25 | Confirm klicken: 1) Lime/Green Stained Glass Pane, 2) Fallback Text "confirm", 3) sonst Screen schließen |
-| 26 | Nach Confirm: neue Order wählen lassen, oder zurück zu 22 / 20 / 27 |
-| 27 | ESC #1 |
-| 28 | ESC #2, `dropLootClicksDone = 0`, zurück zu State 2 |
-
-**Detection-Mechaniken in State 22:**
-- **Chest voll:** alle GUI-Slots belegt → State 23
-- **Drop-Detection:** Inventar-Bones nehmen ab, aber der Chest-Füllstand wächst
-  nicht → Items fallen auf den Boden (Order voll/abgelaufen) →
-  `bonesFarmerPickNewOrder = true`, State 23
-- **Stall-Detection:** 10 Ticks ohne Fortschritt → State 23
-- **Delivery-Timer:** Der Chat-Listener setzt `bonesFarmerDeliveryDone`, sobald
-  eine Nachricht `"deliver"` oder (`"bones"` und `"complet"`) enthält. Kommt
-  **100 Ticks (5 s)** lang keine neue Nachricht mehr, gilt die Order als voll →
-  neue Order wählen.
-
-**Konfiguration:**
-- `bonesFarmerDropBase` (Default 28, 1–99) — GUI-Modul 15, persistiert in
-  `krypton_bfdrop.txt`
-- `bonesFarmerHotkey` — GUI-Modul 14, persistiert in `krypton_bfkey.txt`
-
----
 
 ### 5.6 Discord-gesteuertes Spawner-Script (`spawnerScriptActive`)
 
@@ -635,7 +584,7 @@ Zeile pro Historien-Eintrag.
 
 Liste von Spielernamen (immer `toLowerCase()`), die:
 - vom Radar-Logging ausgenommen sind,
-- den Auto Spawner und den Bones Farmer nicht auslösen,
+- den Auto Spawner nicht auslösen,
 - in ESP und Tracers **grün** (`0xFF00FF80`) statt blau gerendert werden,
 - bei der Staff-Erkennung übersprungen werden.
 
@@ -889,7 +838,7 @@ aktiv ist. Angezeigte Einträge:
 Finder: §4<n>                       Player ESP: §bON      Tracers: §bON
 Freecam: §aON                       Fullbright: §eON
 Guard: §eON §8[Menüs gesperrt]       ← §4EINSATZ sobald guardEngaged; §cKEIN SPAWNER IN REICHWEITE wenn Gegner da, aber nichts abbaubar
-Bones: §aON                         Spawner ESP: §dON     Reconnect: §aON
+Spawner ESP: §dON     Reconnect: §aON
 Session Fix: §aON
 §4Rejoin gesperrt (Notfall-Logout)   ← nur wenn wasSafetyLogout gesetzt ist
 ```
@@ -912,18 +861,18 @@ offen ist. `shouldPause()` gibt `false` zurück — das Spiel läuft weiter.
 | 0 | MISC | graues Plus `0xFF8B8FA8` | 0 Freecam, 10 Freecam Key, 3 Disable On Dmg, 19 Staff Scan, 22 Disconnect Log, 20 Session Test, 21 Rejoin Lock |
 | 1 | BASEFINDING | cyan Diamant `0xFF44BBFF` | 4 Bedrock Finder, 12 Min Hole Size |
 | 2 | RENDER | lila Ring `0xFFAA55FF` | 5 Player ESP, 16 Tracers, 6 Spawner ESP, 7 Fullbright |
-| 3 | CLIENT | türkiser Stern `0xFF44CCFF` | 1 Auto Spawner, 2 Auto Reconnect, 18 Session Fix, 23 Session Mode, 11 Reconnect Set, 17 Whitelist, 8 Player Logs, 9 Logout Logs, 13 Bones Farm, 14 Bones Key, 15 Bones Drop |
+| 3 | CLIENT | türkiser Stern `0xFF44CCFF` | 1 Auto Spawner, 2 Auto Reconnect, 18 Session Fix, 23 Session Mode, 11 Reconnect Set, 17 Whitelist, 8 Player Logs, 9 Logout Logs |
 
 **Modul-Indexliste (`MNAME`, 24 Einträge):**
 ```
 0  FREECAM          6  SPAWNER ESP     12 MIN HOLE SIZE   18 SESSION FIX
-1  AUTO SPAWNER     7  FULLBRIGHT      13 BONES FARM      19 STAFF SCAN
-2  AUTO RECONNECT   8  PLAYER LOGS     14 BONES KEY       20 SESSION TEST
-3  DISABLE ON DMG   9  LOGOUT LOGS     15 BONES DROP      21 REJOIN LOCK
+1  AUTO SPAWNER     7  FULLBRIGHT      13 (entfernt)      19 STAFF SCAN
+2  AUTO RECONNECT   8  PLAYER LOGS     14 (entfernt)      20 SESSION TEST
+3  DISABLE ON DMG   9  LOGOUT LOGS     15 (entfernt)      21 REJOIN LOCK
 4  BEDROCK FINDER   10 FREECAM KEY     16 TRACERS         22 DISCONNECT LOG
 5  PLAYER ESP       11 RECONNECT SET   17 WHITELIST       23 SESSION MODE
 ```
-Toggle-Module sind `mi < 8 || mi == 13 || mi == 16 || mi == 18 || mi == 21` —
+Toggle-Module sind `mi < 8 || mi == 16 || mi == 18 || mi == 21` —
 sie bekommen einen animierten Pill-Toggle (16×8 px, Thumb fährt 8 px). Alle
 anderen zeigen `>`, ein `[KEY]`-Label oder einen Inline-Zahlenwert.
 
@@ -941,7 +890,7 @@ anderen zeigen `>`, ein `[KEY]`-Label oder einen Inline-Zahlenwert.
 **Animationen:** `openAnim` (0→1, `+0.10` pro Frame) steuert Overlay-Alpha und
 ein Slide-in von −24 px. `dotAnim[]` (Größe **24**) interpoliert die Toggle-Position mit
 `+= (target - current) * 0.22`. Die Indizes 0–7 laufen über eine Schleife,
-13/16/18/21 werden einzeln nachgezogen.
+16/18/21 werden einzeln nachgezogen.
 
 **Input:** Maus-Klicks werden **nicht** über `mouseClicked()` verarbeitet,
 sondern per `GLFW.glfwGetMouseButton()`-Polling im `render()` mit
@@ -949,10 +898,10 @@ sondern per `GLFW.glfwGetMouseButton()`-Polling im `render()` mit
 `modRightClick()` auf — derzeit ohne Funktion.
 
 **Inline-Eingabemodi** in `keyPressed(KeyInput)`:
-- `isRebindingFreecam` / `isRebindingBonesFarmer` — nächster Tastendruck wird
+- `isRebindingFreecam` — nächster Tastendruck wird
   gebunden (`setKeyBindingBoundKey()` + speichern)
 - `isEnteringHoleSize` — max. 3 Ziffern, Enter/ESC übernimmt (ESC schließt zusätzlich die GUI)
-- `isEnteringDropCount` — max. 2 Ziffern, `commitDropCount()` validiert 1–99
+
 
 **Farbpalette:**
 ```
@@ -995,15 +944,13 @@ Alle Dateien liegen im **Arbeitsverzeichnis** des Spiels (`run/` im Dev,
 | `krypton_freecam_settings.txt` | `disableFreecamOnDamage` | `loadFreecamSettings` / `saveFreecamSettings` |
 | `krypton_cheats.txt` | 7 Zeilen: BedrockFinder, PlayerESP, AutoSpawner, SpawnerESP, Tracers, **SessionFix**, **SessionFixMode** (0–2) | `loadCheatStates` / `saveCheatStates` |
 | `krypton_reconnect.txt` | Z1 aktiv, Z2 infinite, Z3 Delays (CSV) | `loadReconnect` / `saveReconnect` |
-| `krypton_bfkey.txt` | Bones-Farmer-Keycode | `loadBonesFarmerKey` / `saveBonesFarmerKey` |
-| `krypton_bfdrop.txt` | `bonesFarmerDropBase` (1–99) | `loadDropBase` / `saveDropBase` |
 | `krypton_discord_id.txt` | letzte verarbeitete Discord-Message-ID | `loadDiscordConfig` / `saveLastDiscordMessageId` |
 | `krypton_safelogout.txt` | `wasSafetyLogout` (`true`/`false`) — Notfall-Logout-Sperre | `loadSafetyLogout` / `setSafetyLogout` |
 | `krypton_staffglyphs.txt` | zusätzliche Stern-Codepoints, einer pro Zeile (`U+E001`) | `loadStaffGlyphs` / `saveStaffGlyphs` |
 | `krypton_staffdetect.txt` | `green=`/`blue=`/`purple=`/`other=`/`text=` (je `true`/`false`) | `loadStaffDetect` / `saveStaffDetect` |
 | `krypton_disconnects.txt` | letzte 20 Trenngründe, eine Zeile pro Eintrag | `loadDisconnectLog` / `saveDisconnectLog` |
 
-**Nicht persistiert:** `isFreecamActive`, `isBonesFarmerActive`, `minHoleSize`,
+**Nicht persistiert:** `isFreecamActive`, `minHoleSize`,
 `spawnerScriptActive`, `guardEngaged`, `sneakSuppressTicks`.
 
 `saveCheatStates()` wird bei `CLIENT_STOPPING` **und** beim Umschalten von
@@ -1051,7 +998,7 @@ float f   = sensitivity * 0.6F + 0.2F;
 float gcd = f * f * f * 8.0F * 0.15F;
 step -= step % gcd;
 ```
-Wird in Auto Spawner (State 2 + 5), Bones Farmer (State 2) und Spawner Script
+Wird in Auto Spawner (State 2 + 5) und Spawner Script
 (State 2 + 3) verwendet.
 
 ### 9.1b Vanilla-Gates umgehen statt bekämpfen
@@ -1068,7 +1015,7 @@ Hex-Werte. `starColorFamily()` rechnet deshalb nach HSV um und ordnet über den
 Farbton zu, mit einer Sättigungsschwelle gegen Weiß/Grau. Siehe §5.10.
 
 ### 9.2 Reflection
-Wird an fünf Stellen eingesetzt, um Mapping-Änderungen zu überleben:
+Wird an vier Stellen eingesetzt, um Mapping-Änderungen zu überleben:
 - `getBoundKeyCode()` / `setKeyBindingBoundKey()` — findet das **nicht-finale**
   `InputUtil.Key`-Feld in `KeyBinding` (`defaultKey` ist immer `final`,
   `boundKey` nicht) und ruft danach `KeyBinding.updateKeysByCode()`
@@ -1077,31 +1024,19 @@ Wird an fünf Stellen eingesetzt, um Mapping-Änderungen zu überleben:
   **Hinweis: aktuell definiert, aber nicht aufgerufen** (der `PerspectiveMixin`
   hat diesen Ansatz ersetzt)
 - Auslesen des Disconnect-Grunds: Feld vom Typ `DisconnectionInfo` in `DisconnectedScreen` → `reason()`; Fallback erstes **nicht-statisches** `Text`-Feld
-- `snapCursorToSlot()` — liest `x`/`y` (GUI-Offset) aus `HandledScreen`
 
 ### 9.3 GUI-Slot-Erkennung
-Server-GUIs werden nicht über feste Slot-Indizes, sondern über Inhalt erkannt:
-- `itemTextContains()` — durchsucht **Name + CUSTOM_NAME-Component + LORE**,
-  entfernt vorher alle `§`-Farbcodes per Regex
-- `findDropButton()` — erst Item-Typ (`DISPENSER`/`DROPPER`), dann Text `"drop"`
-- `findNextButton()` — dreistufig: Arrow **mit** `next`/`forward`/`right` →
-  Arrow **ohne** `back`/`prev`/`left` → beliebiger Text `"next"`
-- `findSlotByName()` / `findSlotInRange()` — generisch
-- `hasArrowInSpawnerGui()` — prüft nur Slots 0–44; Slots 45–53 enthalten den
-  NEXT-Button (selbst ein Arrow) und dürfen nicht mitgezählt werden
-- **Slot-Konvention:** `handler.slots.size() - 36` = Anzahl der GUI-Slots
-  (die letzten 36 sind immer das Spielerinventar)
+Mit dem früheren Farm-Bot entfernt. Das Discord-Spawner-Script (State 6) erkennt den
+TPA-Bestätigungs-Button noch direkt über den Item-Typ (Lime/Green Stained Glass Pane);
+Slot-Konvention weiterhin: `handler.slots.size() - 36` = Anzahl der GUI-Slots.
 
 ### 9.4 Anti-Pattern-Maßnahmen (Übersicht)
 - Randomisierte Delays zwischen allen State-Übergängen
 - Randomisierte Zielpunkte innerhalb des Ziel-Blocks
 - Brownian-Motion-Drift statt periodischer Muster
-- Micro-Jitter auf Rotationen beim Bones Farmer
 - Reconnect-Delays mit ±15-Tick-Jitter
 - Freecam lässt Velocity/Knockback unangetastet und interagiert nur in Körper-Blickrichtung
-- Bones Farmer: max. ~10 GUI-Klicks/s (4–8 Ticks zwischen Klicks, ein Shift-Klick pro 2 Ticks)
-- `snapCursorToSlot()` bewegt den echten OS-Cursor mit ±3 px Jitter auf den Slot
-- Automatisches Abschalten bei erkanntem Staff (Guard **und** Bones Farmer)
+- Automatisches Abschalten bei erkanntem Staff (Guard)
 
 ### 9.4b Sneak und Block-Interaktion schließen sich aus
 `ServerPlayerInteractionManager.interactBlock()` prüft
@@ -1114,8 +1049,8 @@ den Dauer-Sneak deshalb vorher abmelden (`suppressSneak()`) und warten, bis
 
 ### 9.5 Thread-Sicherheit
 - `playerHistory` und `stableHoles` sind `CopyOnWriteArrayList`
-- `lastDiscordMessageId`, `spawnerScriptTrigger`, `spawnerScriptActive`,
-  `bonesFarmerDeliveryDone` sind `volatile` (Discord-Threads / Chat-Callbacks)
+- `lastDiscordMessageId`, `spawnerScriptTrigger`, `spawnerScriptActive`
+  sind `volatile` (Discord-Threads)
 - Renderer arbeiten auf `ArrayList`-Snapshots von `world.getPlayers()`
 
 ---
@@ -1165,15 +1100,10 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
   Eine Aufteilung in Module/Manager wäre der naheliegende nächste Refactor-Schritt.
 - Discord-JSON wird per `indexOf`/`substring` geparst — bricht, sobald das
   Antwortformat oder die Feldreihenfolge sich ändert.
-- `debugLogSlots()` und `findSlotInRange()` sind definiert, werden aber nirgends
-  aufgerufen (`debugLogSlots` war das frühere Bones-Farmer-Debugging).
 - `setGamePerspective()` ist toter Code seit dem `PerspectiveMixin`.
 - `modRightClick()` ist leer.
-- `bonesFarmerLoggedSlots` wird gesetzt, aber nie ausgewertet.
 - `ExampleMixin` ist ein leerer Template-Rest und in `krypton.mixins.json`
   gar nicht registriert — die Datei kann ersatzlos weg.
-- `arrowsBeforeSpawner` wird im Bones Farmer als Bone-Zähler zweckentfremdet —
-  der Name stammt noch aus einer früheren Version.
 - `Runtime.getRuntime().halt(1)` in State 10 des Spawner-Scripts beendet die JVM
   **ohne** Shutdown-Hooks — `saveCheatStates()` läuft dabei nicht mehr.
 
@@ -1280,7 +1210,7 @@ Diese vier Tests decken die kritischen Pfade ab.
 3. Guard ausschalten, **währenddessen Shift gedrückt halten** → der Spieler
    bleibt geduckt (echter Tastenzustand wurde übernommen). Loslassen → steht auf.
 4. Guard aus **ohne** Shift → der Spieler steht sofort auf (kein hängender Key).
-5. Mit Guard an einen Spawner rechtsklicken (Bones Farmer) → die GUI muss
+5. Mit Guard an einen Block rechtsklicken (z. B. in der Freecam) → die GUI muss
    **trotzdem aufgehen** (§9.4b). Geht sie nicht auf, greift die
    Sneak-Unterdrückung nicht.
 
