@@ -398,6 +398,18 @@ Zusätzlich läuft `cancelBlockBreaking()` wie in Vanillas
 `handleBlockBreaking(false)`. Damit ist der Tastenzustand an jeder Stelle
 konsistent, die ihn abfragt.
 
+**Alle Tasten los, auch Sneak — nicht nur die Abbau-Taste.** Praktisch
+ermittelt: wird nur der Linksklick gelöst und der Dauer-Sneak läuft durch,
+bricht der Guard nach ein bis zwei Exemplaren ab — der Server sieht dann keinen
+sauber getrennten neuen Abbau-Vorgang. Deshalb meldet die Pause über
+`suppressSneak()` auch den Auto-Sneak ab (§5.4.2); der Spieler steht für die
+Dauer der Pause auf.
+
+Danach geht es **nicht** direkt weiter: die State-Machine springt zurück auf
+**State 3**, der wartet, bis der Sneak serverseitig wieder anliegt, und erst
+State 4 drückt die Abbau-Taste neu. Das ist exakt der Ablauf von Hand — alles
+loslassen, wieder ducken, wieder zugreifen.
+
 > **Nur ZWISCHEN Blöcken loslassen.** `cancelBlockBreaking()` setzt
 > `currentBreakingProgress` auf 0 zurück. Eine Pause *mitten* im Abbau hätte zur
 > Folge, dass der Spawner nie fertig wird. Deshalb hängt die Pause strikt am
