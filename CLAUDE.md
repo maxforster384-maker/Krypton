@@ -307,7 +307,7 @@ Gibt es keinen erreichbaren Spawner, zeigt das HUD
 | 2 | Auf den Spawner drehen (siehe Rotation unten) | — |
 | 3 | Warten bis der Sneak serverseitig anliegt (`player.isSneaking()`), Notausstieg nach 10 Ticks | 1–2 |
 | 4 | `attackKey` drücken, `isMining = true`, `guardAimFailTicks = 0` | — |
-| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1). Nach jedem zerbrochenen Block **8–13 Ticks Pause mit mechanisch losgelassener Taste** (siehe unten) | — |
+| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1). Nach jedem zerbrochenen Block **rund 1 s Pause, in der ALLE Tasten losgelassen werden (auch Sneak)** (siehe unten) | — |
 
 **Rotation (State 2):** Zielwinkel aus `atan2`. Es wird ein
 **GCD-Snapping** angewendet, das die Vanilla-Mausbewegung nachbildet:
@@ -383,9 +383,9 @@ Erkannt wird der Bruch stattdessen an `interactionManager.isBreakingBlock()`:
 Vanilla setzt `breakingBlock = false` (plus 5 Ticks `blockBreakingCooldown`)
 genau in dem Tick, in dem `currentBreakingProgress` 1.0 erreicht — unabhängig
 davon, was danach an der Position steht. Fällt das Flag, wird
-`guardReleaseTicks = 8 + rand(6)` gesetzt: 8–13 Ticks ohne gedrückte Taste und
+`guardReleaseTicks = 14 + rand(9)` gesetzt: 14–22 Ticks ohne gedrückte Taste und
 ohne Abbau-Paket. Dazu kommen Vanillas 5 Ticks `blockBreakingCooldown`, die nach
-einem Bruch ohnehin laufen — effektiv **650–900 ms**. Kürzer reicht auf einem
+einem Bruch ohnehin laufen — effektiv **rund eine Sekunde**. Kürzer reicht auf einem
 vollen Server nicht: das nächste Exemplar des Stacks kommt erst mit der Antwort
 des Servers an, bis dahin steht an der Position clientseitig Luft. Danach startet
 der nächste Abbau mit einem frischen `START_DESTROY_BLOCK`, also einem sauber

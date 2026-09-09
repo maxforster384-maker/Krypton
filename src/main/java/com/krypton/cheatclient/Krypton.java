@@ -1857,7 +1857,13 @@ public class Krypton implements ModInitializer {
                 guardNoReachableSpawner = enemyFound && spawnerPos == null && !hasMinedSpawner;
                 if (guardSinceBreakTicks < 9999) guardSinceBreakTicks++;
 
-                if (isMining && lastTargetSpawner != null) {
+                // Waehrend der Pause zwischen zwei Bloecken NICHT zuruecksetzen:
+                // dort ist die Position fuer ein paar Ticks leer, bis der Server das
+                // naechste Exemplar des Stacks nachschickt. Ein Reset wuerde die
+                // State-Machine mitten im Stack neu starten lassen (isMining=false →
+                // Vanilla-Mining nicht mehr unterdrueckt → beide Pfade gleichzeitig →
+                // genau das Rumbocken, das man dann sieht).
+                if (isMining && lastTargetSpawner != null && guardReleaseTicks <= 0) {
                     if (!client.world.getBlockState(lastTargetSpawner).isOf(Blocks.SPAWNER)) {
                         setAttackPressed(client,false);
                         isMining = false;
@@ -1998,7 +2004,11 @@ public class Krypton implements ModInitializer {
                             // also mit einem sauber getrennten neuen Klick.
                             if (guardReleaseTicks > 0) {
                                 guardReleaseTicks--;
-                                setAttackPressed(client,false);
+                                setAttackPressed(client, false);
+                                // Sneak bleibt die ganze Pause ueber abgemeldet.
+                                // Erneut setzen, falls etwas anderes den Zaehler
+                                // zwischendurch heruntergezaehlt hat.
+                                suppressSneak(guardReleaseTicks + 2);
                                 // Vollstaendiges Loslassen wie in Vanilla: dort ruft
                                 // handleBlockBreaking(false) cancelBlockBreaking() auf.
                                 // Nach einem fertigen Bruch ist breakingBlock bereits
@@ -2006,6 +2016,16 @@ public class Krypton implements ModInitializer {
                                 // Aufruf raeumt nur einen evtl. angefangenen Abbau ab.
                                 if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                                 guardWasBreaking = false;
+                                if (guardReleaseTicks == 0) {
+                                    // Pause vorbei: NICHT direkt weiterhauen, sondern
+                                    // zurueck in State 3. Der wartet, bis der Sneak
+                                    // serverseitig wieder anliegt, und State 4 drueckt
+                                    // die Abbau-Taste danach neu. Genau der Ablauf, den
+                                    // ein Spieler von Hand macht: alles loslassen,
+                                    // wieder ducken, wieder zugreifen.
+                                    autoSpawnerState = 3;
+                                    guardSneakWaitTicks = 0;
+                                }
                                 break;
                             }
                             setAttackPressed(client,true);
@@ -2054,8 +2074,20 @@ public class Krypton implements ModInitializer {
                                 boolean breakingNow = client.interactionManager.isBreakingBlock();
                                 if (guardWasBreaking && !breakingNow) {
                                     guardSinceBreakTicks = 0;
-                                    guardReleaseTicks = 8 + (int)(Math.random() * 6);
-                                    setAttackPressed(client,false);
+                                    // Lange Pause: 14-22 Ticks (700-1100 ms) plus Vanillas
+                                    // 5 Ticks blockBreakingCooldown = rund eine Sekunde.
+                                    guardReleaseTicks = 14 + (int)(Math.random() * 9);
+                                    setAttackPressed(client, false);
+                                    // ALLE Tasten los, auch SNEAK – genau so, wie ein
+                                    // Spieler zwischen zwei Spawnern kurz alles loslaesst.
+                                    // Nur die Abbau-Taste zu loesen reicht nicht: der
+                                    // Dauer-Sneak laeuft sonst durch, und der Server sieht
+                                    // keinen sauber getrennten neuen Abbau-Vorgang.
+                                    // suppressSneak() meldet den Dauer-Sneak ab;
+                                    // applyForceSneak() gibt die Taste im naechsten
+                                    // START_CLIENT_TICK auf den echten Zustand zurueck und
+                                    // holt sie danach von allein wieder.
+                                    suppressSneak(guardReleaseTicks + 2);
                                 }
                                 guardWasBreaking = breakingNow;
                             } else {
