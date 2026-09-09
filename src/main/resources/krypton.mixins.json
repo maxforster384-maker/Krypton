@@ -12,6 +12,7 @@
 		"WorldRendererMixin",
 		"SimpleOptionMixin",
 		"MinecraftClientMixin",
+		"InteractionManagerAccessor",
 		"PerspectiveMixin"
 	],
 	"injectors": {

@@ -934,12 +934,33 @@ public class Krypton implements ModInitializer {
     private static void setAttackPressed(MinecraftClient client, boolean pressed) {
         if (client == null || client.options == null) return;
         KeyBinding k = client.options.attackKey;
+        boolean was = k.isPressed();
         k.setPressed(pressed);
         try {
             InputUtil.Key key = getBoundKey(k);
             if (key != null && key.getCode() != GLFW.GLFW_KEY_UNKNOWN) {
                 KeyBinding.setKeyPressed(key, pressed);
+                // Druck-FLANKE wie bei einem echten Mausklick: Mouse.onMouseButton
+                // ruft beim Druecken zusaetzlich onKeyPressed() auf, das
+                // timesPressed hochzaehlt. Erst dadurch meldet wasPressed() einen
+                // frischen Klick – ohne diesen Aufruf ist es fuer alles, was die
+                // Flanke auswertet, nur ein dauerhaft gehaltener Knopf.
+                if (pressed && !was) KeyBinding.onKeyPressed(key);
             }
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Setzt den Interaktions-Manager zwischen zwei Bloecken komplett zurueck.
+     * Insbesondere Vanillas blockBreakingCooldown (5 Ticks nach jedem Bruch),
+     * waehrend dessen updateBlockBreakingProgress() gar kein Paket schickt.
+     */
+    private static void resetBlockBreaking(MinecraftClient client) {
+        if (client.interactionManager == null) return;
+        client.interactionManager.cancelBlockBreaking();
+        try {
+            ((com.krypton.cheatclient.mixin.InteractionManagerAccessor) client.interactionManager)
+                    .setBlockBreakingCooldown(0);
         } catch (Exception ignored) {}
     }
 
@@ -1988,14 +2009,31 @@ public class Krypton implements ModInitializer {
                             }
                             break;
 
-                        case 4:
-                            setAttackPressed(client,true);
+                        case 4: {
+                            // FRISCHER MAUSKLICK – exakt der Weg, den Vanilla geht.
+                            //
+                            // MinecraftClient.doAttack() ruft beim Druecken der Taste
+                            // interactionManager.attackBlock() DIREKT auf. Das ist der
+                            // entscheidende Unterschied: updateBlockBreakingProgress()
+                            // wartet zuerst den blockBreakingCooldown ab (5 Ticks nach
+                            // jedem Bruch) und schickt in dieser Zeit gar kein
+                            // START_DESTROY_BLOCK. Ohne den direkten Aufruf beginnt der
+                            // naechste Abbau also nie als sauber getrennter neuer Klick –
+                            // genau deshalb blieb es beim ersten Spawner des Stacks.
+                            setAttackPressed(client, true);
                             isMining = true;
                             guardAimFailTicks = 0;
                             guardReleaseTicks = 0;
                             guardWasBreaking  = false;
+                            BlockHitResult freshHit = guardRaycastTarget(client, lastTargetSpawner);
+                            if (freshHit != null && client.interactionManager != null) {
+                                client.interactionManager.attackBlock(freshHit.getBlockPos(), freshHit.getSide());
+                                client.player.swingHand(Hand.MAIN_HAND);
+                                guardWasBreaking = client.interactionManager.isBreakingBlock();
+                            }
                             autoSpawnerState = 5;
                             break;
+                        }
 
                         case 5:
                             // Pause zwischen zwei Bloecken: die Taste ist wirklich los
@@ -2014,7 +2052,7 @@ public class Krypton implements ModInitializer {
                                 // Nach einem fertigen Bruch ist breakingBlock bereits
                                 // false, es geht also kein ABORT-Paket raus – der
                                 // Aufruf raeumt nur einen evtl. angefangenen Abbau ab.
-                                if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
+                                resetBlockBreaking(client);
                                 guardWasBreaking = false;
                                 if (guardReleaseTicks == 0) {
                                     // Pause vorbei: NICHT direkt weiterhauen, sondern
