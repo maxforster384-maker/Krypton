@@ -3,7 +3,6 @@ package com.krypton.cheatclient.mixin;
 import com.krypton.cheatclient.Krypton;
 import net.minecraft.client.input.KeyboardInput;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -11,9 +10,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(KeyboardInput.class)
 public class KeyboardInputMixin {
 
-	// Input.movementVector ist protected - direkter Zugriff aus dem Mixin kompiliert nicht.
-	// @Shadow bindet das geerbte Feld der Zielklasse (KeyboardInput extends Input).
-	@Shadow protected net.minecraft.util.math.Vec2f movementVector;
+	// movementVector ist protected UND in der Oberklasse Input deklariert.
+	// Ein @Shadow hier liess sich zwar uebersetzen, scheiterte zur Laufzeit aber
+	// beim Anwenden des Mixins (MixinApplyError, Crash beim Weltbeitritt) – das
+	// Remapping suchte das Feld in KeyboardInput statt in Input. Deshalb laeuft
+	// der Zugriff ueber InputAccessor, der direkt auf Input zielt.
 
 	@Inject(method = "tick", at = @At("TAIL"))
 	private void onTick(CallbackInfo ci) {
@@ -34,7 +35,7 @@ public class KeyboardInputMixin {
 			// (LivingEntity.travel ueber getMovementInput), nicht aus playerInput. Ohne diese
 			// Zeile bekam der Koerper in der Freecam weiterhin WASD: ein Millimeter vor,
 			// Kollision, zurueck - jeden Tick, sichtbar fuer alle.
-			this.movementVector = new net.minecraft.util.math.Vec2f(0.0F, 0.0F);
+			((InputAccessor) input).setMovementVector(new net.minecraft.util.math.Vec2f(0.0F, 0.0F));
 		}
 	}
 }

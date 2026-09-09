@@ -13,6 +13,7 @@
 		"SimpleOptionMixin",
 		"MinecraftClientMixin",
 		"InteractionManagerAccessor",
+		"InputAccessor",
 		"PerspectiveMixin"
 	],
 	"injectors": {
