@@ -223,6 +223,23 @@ public class Krypton implements ModInitializer {
     // waeren "Staff"). Dann zaehlt nur noch die Klartext-Erkennung – der Guard
     // schaltet sich also NICHT wegen eines Deko-Symbols ab.
     public static volatile boolean staffDetectSane = true;
+    // Pro Farbfamilie (1=gruen 2=blau 3=lila 4=andere): wie viele Spieler der
+    // Tab-Liste tragen einen Stern dieser Familie – und gilt sie deshalb als
+    // Server-Deko statt als Rang?
+    //
+    // Staff ist auf JEDEM Server eine kleine Minderheit. Auf DonutSMP tragen den
+    // echten Stern 1 von 80 Spielern (1 %), das Deko-Symbol dagegen 97 %. Traegt
+    // eine Farbfamilie mehr als STAFF_FAMILY_MAX_SHARE der Tab-Liste, kann sie
+    // kein Rang-Marker sein. Sie wird dann ignoriert – sonst wuerden reihenweise
+    // normale Spieler (oder Media) als Staff gelten und der Guard wuerde sich
+    // abschalten, also genau dann nicht schuetzen, wenn es darauf ankommt.
+    //
+    // Das ist praeziser als die globale staffDetectSane-Notbremse: es faellt nur
+    // die eine zu haeufige Farbe weg, die echten Rang-Farben bleiben aktiv.
+    public static final int[] staffFamilyCount = new int[5];
+    public static final boolean[] staffFamilyDeko = new boolean[5];
+    private static final double STAFF_FAMILY_MAX_SHARE  = 0.15;
+    private static final int    STAFF_FAMILY_MIN_SAMPLE = 8;
     private static int staffSaneTimer = 0;
     public static int staffSaneTotal = 0, staffSaneHits = 0;
 
@@ -251,6 +268,24 @@ public class Krypton implements ModInitializer {
     // Ticks in denen der Ziel-Spawner nicht per Raycast getroffen wurde
     // (ausser Reichweite / verdeckt). Verhindert ein Haengenbleiben in State 5.
     private static int guardAimFailTicks = 0;
+    // Nach jedem zerbrochenen Block wird die Abbau-Taste kurz LOSGELASSEN, bevor
+    // der naechste Spawner drankommt.
+    //
+    // Warum das noetig ist: Bei GESTACKTEN Spawnern (DonutSMP) ruecht nach dem
+    // Abbau sofort das naechste Exemplar an dieselbe Position nach. Der
+    // Blockzustand bleibt also "Spawner" – die bisherige Bruch-Erkennung
+    // (Block ist kein Spawner mehr) hat deshalb nie ausgeloest, die Taste blieb
+    // gedrueckt, und der Server sah einen einzigen, nie endenden Klick. Der
+    // Abbau des naechsten Exemplars wurde damit nicht mehr registriert.
+    //
+    // Die Pause ist bewusst zufaellig lang (3-8 Ticks = 150-400 ms), damit kein
+    // exaktes Intervall entsteht.
+    //
+    // WICHTIG: NUR zwischen Bloecken loslassen. cancelBlockBreaking() setzt
+    // currentBreakingProgress auf 0 zurueck – eine Pause mitten im Abbau haette
+    // zur Folge, dass der Spawner nie fertig wird.
+    private static int guardReleaseTicks = 0;
+    private static boolean guardWasBreaking = false;
     // Gegner in Reichweite, aber KEIN Spawner, den der Guard von hier aus
     // treffen kann (alle >4,5 Blöcke entfernt oder verdeckt). Der Guard kann
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
@@ -1918,10 +1953,21 @@ public class Krypton implements ModInitializer {
                             client.options.attackKey.setPressed(true);
                             isMining = true;
                             guardAimFailTicks = 0;
+                            guardReleaseTicks = 0;
+                            guardWasBreaking  = false;
                             autoSpawnerState = 5;
                             break;
 
                         case 5:
+                            // Pause zwischen zwei Bloecken: die Taste ist wirklich los
+                            // und es geht KEIN Abbau-Paket raus. Danach beginnt der
+                            // naechste Abbau mit einem frischen START_DESTROY_BLOCK,
+                            // also mit einem sauber getrennten neuen Klick.
+                            if (guardReleaseTicks > 0) {
+                                guardReleaseTicks--;
+                                client.options.attackKey.setPressed(false);
+                                break;
+                            }
                             client.options.attackKey.setPressed(true);
 
                             // Brownian-Motion-Drift: random walk mit Mean-Reversion
@@ -1959,6 +2005,18 @@ public class Krypton implements ModInitializer {
                                 guardAimFailTicks = 0;
                                 client.interactionManager.updateBlockBreakingProgress(guardHit.getBlockPos(), guardHit.getSide());
                                 client.player.swingHand(Hand.MAIN_HAND);
+                                // Blockbruch erkennen: isBreakingBlock() faellt genau in dem
+                                // Tick auf false, in dem der Fortschritt 1.0 erreicht hat
+                                // (Vanilla setzt dort breakingBlock=false + 5 Ticks
+                                // blockBreakingCooldown). Das greift AUCH bei gestackten
+                                // Spawnern, wo der Blockzustand danach unveraendert bleibt –
+                                // im Gegensatz zur reinen "ist kein Spawner mehr"-Pruefung.
+                                boolean breakingNow = client.interactionManager.isBreakingBlock();
+                                if (guardWasBreaking && !breakingNow) {
+                                    guardReleaseTicks = 3 + (int)(Math.random() * 6);
+                                    client.options.attackKey.setPressed(false);
+                                }
+                                guardWasBreaking = breakingNow;
                             } else {
                                 // Ziel verdeckt oder außer Reichweite.
                                 if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -2589,6 +2647,42 @@ public class Krypton implements ModInitializer {
         };
     }
 
+    /**
+     * Farbfamilie zu haeufig fuer einen Rang → Server-Deko, zaehlt nie als Staff.
+     * Gefuellt von updateStaffSanity() aus der kompletten Tab-Liste.
+     */
+    static boolean starFamilyIsDeko(int family) {
+        return family >= 1 && family <= 4 && staffFamilyDeko[family];
+    }
+
+    /**
+     * Alle Stern-Farbfamilien eines Spielers – bewusst OHNE Deko-Filter.
+     * Wird nur fuer die Haeufigkeitsstatistik gebraucht; mit Filter waere die
+     * Rechnung zirkulaer (der Filter entsteht ja erst aus dieser Statistik).
+     */
+    static java.util.Set<Integer> rawStarFamilies(RankSources s) {
+        java.util.Set<Integer> fams = new HashSet<>();
+        collectFamiliesFrom(s.tab(), fams);
+        collectFamiliesFrom(s.entityName(), fams);
+        net.minecraft.scoreboard.Team team = s.team();
+        if (team != null) {
+            try { collectFamiliesFrom(team.getPrefix(), fams); } catch (Exception ignored) {}
+            try { collectFamiliesFrom(team.getSuffix(), fams); } catch (Exception ignored) {}
+            try { collectFamiliesFrom(team.getDisplayName(), fams); } catch (Exception ignored) {}
+        }
+        return fams;
+    }
+
+    private static void collectFamiliesFrom(Text t, java.util.Set<Integer> out) {
+        if (t == null) return;
+        List<int[]> stars = new ArrayList<>();
+        collectStars(t, stars);
+        for (int[] st : stars) {
+            int fam = starColorFamily(st[1]);
+            if (fam >= 1 && fam <= 4) out.add(fam);
+        }
+    }
+
     /** Gilt dieses Zeichen als Stern? Eingebaute Liste + eigene Glyphen. */
     static boolean isStarGlyph(int cp) {
         if (cp < 0x80) return false;                       // ASCII zaehlt nie
@@ -2707,6 +2801,8 @@ public class Krypton implements ModInitializer {
         collectStars(t, stars);
         for (int[] st : stars) {
             int fam = starColorFamily(st[1]);
+            // Zu haeufige Farbe = Deko, niemals ein Rang (siehe staffFamilyDeko).
+            if (starFamilyIsDeko(fam)) continue;
             if (starFamilyIsStaff(fam)) return starRankName(fam);
         }
         return "";
@@ -2889,19 +2985,36 @@ public class Krypton implements ModInitializer {
      */
     private static void updateStaffSanity(MinecraftClient client) {
         if (client.world == null || client.player == null) return;
-        int total = 0, hits = 0;
         // Ueber die TAB-LISTE, nicht nur geladene Entities: bei 80 Spielern im
-        // Tab ist die 50-%-Regel aussagekraeftig, bei 2 Entities in der Naehe nicht.
+        // Tab ist die Statistik aussagekraeftig, bei 2 Entities in der Naehe nicht.
         String myName = client.player.getName().getString();
+        List<RankSources> relevant = new ArrayList<>();
         for (RankSources s : tabSources(client)) {
             if (s.entity() == client.player || s.name().equalsIgnoreCase(myName)) continue;
             if (whitelistedPlayers.contains(s.name().toLowerCase())) continue;
-            total++;
+            relevant.add(s);
+        }
+        int total = relevant.size();
+
+        // 1) Haeufigkeit je Farbfamilie – ohne Deko-Filter, sonst zirkulaer.
+        int[] famCount = new int[5];
+        for (RankSources s : relevant) {
+            for (int fam : rawStarFamilies(s)) famCount[fam]++;
+        }
+        for (int f = 1; f <= 4; f++) {
+            staffFamilyCount[f] = famCount[f];
+            staffFamilyDeko[f]  = total >= STAFF_FAMILY_MIN_SAMPLE
+                    && famCount[f] > total * STAFF_FAMILY_MAX_SHARE;
+        }
+
+        // 2) Erst mit den frischen Deko-Flags zaehlen, wie viele als Staff gelten.
+        int hits = 0;
+        for (RankSources s : relevant) {
             if (!starRankOf(s).isEmpty()) hits++;
         }
         staffSaneTotal = total;
         staffSaneHits  = hits;
-        // Ab 5 Spielern aussagekraeftig; darunter bleibt die Erkennung an.
+        // Globale Notbremse bleibt als zweite Ebene: Ab 5 Spielern aussagekraeftig.
         staffDetectSane = !(total >= 5 && hits * 2 > total);
     }
 
@@ -2929,6 +3042,18 @@ public class Krypton implements ModInitializer {
                 + " §7lila=" + (staffStarPurple ? "§aan" : "§caus")
                 + " §7andere=" + (staffStarOther ? "§aan" : "§caus")
                 + " §7Text=" + (staffTextRanks ? "§aan" : "§caus"));
+        // Welche Farbfamilie wurde als Server-Deko verworfen? Genau das ist der
+        // Schutz davor, dass normale Spieler oder Media als Staff gelten.
+        StringBuilder dekoLine = new StringBuilder();
+        for (int f = 1; f <= 4; f++) {
+            if (!staffFamilyDeko[f]) continue;
+            if (dekoLine.length() > 0) dekoLine.append("§8, ");
+            dekoLine.append("§c").append(starRankName(f))
+                    .append(" §8(").append(staffFamilyCount[f]).append("/").append(staffSaneTotal).append(")");
+        }
+        lines.add(dekoLine.length() > 0
+                ? "§8Als Deko verworfen (zu häufig für einen Rang): " + dekoLine
+                : "§8Keine Farbfamilie als Deko verworfen.");
         lines.add("");
         // Komplette Tab-Liste – nicht nur geladene Entities (sonst sieht man
         // auf einem vollen Server nur sich selbst).
