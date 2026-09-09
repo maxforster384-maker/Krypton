@@ -301,6 +301,11 @@ public class Krypton implements ModInitializer {
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
     // in Sicherheit, während der Schutz faktisch nicht greift.
     public static boolean guardNoReachableSpawner = false;
+    // Gegner in Reichweite, aber die Stern-Erkennung ist gerade unplausibel
+    // (staffDetectSane == false). Dann laesst sich Staff nicht sicher von
+    // normalen Spielern unterscheiden – der Guard haelt still, statt blind
+    // abzubauen. Ein Ban ist teurer als ein verlorener Spawner.
+    public static boolean guardHoldUnsafe = false;
     // Laufende Bereitschaftsprüfung (alle 40 Ticks = 2 s), solange der Guard
     // scharf, aber nicht im Einsatz ist: erreichbarer Spawner? Spitzhacke?
     // Leer = bereit, sonst der Grund fürs HUD. Der Sinn: NICHT erst merken,
@@ -308,9 +313,6 @@ public class Krypton implements ModInitializer {
     public static String guardReadyReason = "";
     public static String guardReadyWarn   = "";   // nicht blockierend (z. B. kein Silk Touch)
     private static int guardReadyTimer = 0;
-    // Einmaliger Versuch pro Einsatz, eine Spitzhacke aus dem Inventar in die
-    // Hotbar zu tauschen (verhindert eine Endlosschleife in State 1).
-    private static boolean guardSwapTried = false;
     // Spawner, die 3 s lang nicht getroffen wurden. Werden bei der nächsten
     // Zielwahl übersprungen, sonst wählt findReachableSpawner() sofort wieder
     // dasselbe unerreichbare Ziel und der Guard dreht sich im Kreis.
@@ -1093,16 +1095,23 @@ public class Krypton implements ModInitializer {
         if (findReachableSpawner(client) == null) {
             reason = "kein Spawner in Reichweite (max. 4,5 Blöcke, freie Sicht)";
         } else {
-            boolean pick = false, silk = false;
+            // NUR die Hotbar zaehlt: der Guard kann ausschliesslich per
+            // setSelectedSlot() waehlen. Eine Spitzhacke im Hauptinventar nuetzt
+            // ihm nichts mehr, seit der SWAP-Griff raus ist (siehe State 1).
+            // Deshalb wird der Fall auch getrennt gemeldet – sonst stuende
+            // "bereit" im HUD, obwohl der Guard nicht abbauen koennte.
+            boolean hotbarPick = false, hotbarSilk = false, invPick = false;
             for (int i = 0; i < 36; i++) {
                 ItemStack st = client.player.getInventory().getStack(i);
                 if (!st.isIn(ItemTags.PICKAXES)) continue;
-                pick = true;
                 String enc = st.getEnchantments().toString().toLowerCase();
-                if (enc.contains("silk_touch") || enc.contains("behutsamkeit")) { silk = true; break; }
+                boolean isSilk = enc.contains("silk_touch") || enc.contains("behutsamkeit");
+                if (i < 9) { hotbarPick = true; if (isSilk) hotbarSilk = true; }
+                else invPick = true;
             }
-            if (!pick)      reason = "keine Spitzhacke im Inventar";
-            else if (!silk) warn   = "ohne Silk Touch";
+            if (!hotbarPick && invPick) reason = "Spitzhacke liegt im Inventar, nicht in der Hotbar";
+            else if (!hotbarPick)       reason = "keine Spitzhacke in der Hotbar";
+            else if (!hotbarSilk)       warn   = "ohne Silk Touch";
         }
         guardReadyReason = reason;
         guardReadyWarn   = warn;
@@ -1829,6 +1838,7 @@ public class Krypton implements ModInitializer {
             // ====================================================
             if (isAutoSpawnerActive && client.world != null && client.player != null && !isFreecamActive) {
                 boolean enemyFound = false;
+                guardHoldUnsafe = false;
 
                 for (PlayerEntity p : client.world.getPlayers()) {
                     if (p == client.player) continue;
@@ -1857,7 +1867,19 @@ public class Krypton implements ModInitializer {
                         break;
                     }
 
-                    // Normaler Spieler → abbauen + ausloggen
+                    // Normaler Spieler → abbauen + ausloggen.
+                    //
+                    // ABER: Ist die Stern-Erkennung gerade unplausibel, koennen wir
+                    // Staff NICHT sicher von normalen Spielern unterscheiden. Frueher
+                    // lief in dem Fall nur noch die Klartext-Erkennung weiter – auf
+                    // einem Server, dessen Team ausschliesslich Sterne benutzt (wie
+                    // hier), waere Staff damit unsichtbar gewesen und der Guard haette
+                    // vor einem Admin abgebaut und sich ausgeloggt.
+                    // Jetzt: still halten. Ein Ban ist teurer als ein Spawner.
+                    if (!staffDetectSane) {
+                        guardHoldUnsafe = true;
+                        break;
+                    }
                     enemyFound = true;
                     String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
                     int dist = (int) Math.round(Math.sqrt(client.player.squaredDistanceTo(p)));
@@ -1908,7 +1930,6 @@ public class Krypton implements ModInitializer {
                         autoSpawnerState = 0;
                         driftYaw = 0f;
                         driftPitch = 0f;
-                        guardSwapTried = false;
                     }
 
                     if (actionDelayTimer > 0) {
@@ -1934,27 +1955,20 @@ public class Krypton implements ModInitializer {
                             }
                             if (bestSlot == -1) bestSlot = backupPickaxe;
 
-                            if (bestSlot == -1 && !guardSwapTried && client.interactionManager != null) {
-                                // Keine Spitzhacke in der Hotbar → aus dem Inventar in den aktuellen
-                                // Hotbar-Slot tauschen. SWAP mit Button = Hotbar-Index ist exakt das
-                                // Paket, das Vanilla bei einer Zifferntaste über einem Slot schickt.
-                                // Silk Touch bevorzugt. Danach bleibt State 1 und findet die Hacke.
-                                guardSwapTried = true;
-                                int src = -1;
-                                for (int i = 9; i < 36; i++) {
-                                    ItemStack stack = inv.getStack(i);
-                                    if (!stack.isIn(ItemTags.PICKAXES)) continue;
-                                    if (src == -1) src = i;
-                                    String enchants = stack.getEnchantments().toString().toLowerCase();
-                                    if (enchants.contains("silk_touch") || enchants.contains("behutsamkeit")) { src = i; break; }
-                                }
-                                if (src != -1) {
-                                    client.interactionManager.clickSlot(client.player.playerScreenHandler.syncId,
-                                            src, inv.getSelectedSlot(), SlotActionType.SWAP, client.player);
-                                    actionDelayTimer = 2 + (int)(Math.random() * 3);
-                                    break;
-                                }
-                            }
+                            // KEIN Holen aus dem Hauptinventar mehr.
+                            //
+                            // Frueher wurde eine fehlende Spitzhacke per
+                            // SlotActionType.SWAP aus dem Inventar in die Hotbar
+                            // getauscht. Dieses Paket schickt ein Vanilla-Client aber
+                            // ausschliesslich bei OFFENEM Inventar (Zifferntaste ueber
+                            // einem Slot). Bei geschlossenem Inventar nimmt der Server
+                            // es zwar an – syncId 0 ist immer gueltig –, es ist aber ein
+                            // Verhalten, das kein normaler Client zeigt und das ein
+                            // Anti-Cheat als Inventar-Manipulation werten kann.
+                            //
+                            // Stattdessen warnt die Bereitschaftspruefung
+                            // (updateGuardReadiness) schon vorher im HUD, wenn die
+                            // Spitzhacke nicht in der Hotbar liegt.
                             if (bestSlot != -1) inv.setSelectedSlot(bestSlot);
                             // Ohne jede Spitzhacke wird trotzdem abgebaut (langsam) – besser als nichts.
                             autoSpawnerState = 2;
@@ -2270,7 +2284,9 @@ public class Krypton implements ModInitializer {
             if (wasSafetyLogout) activeCheats.add("§4Rejoin gesperrt (Notfall-Logout)");
             // Sichtbare Warnung statt stillem Schutzverlust
             if (!staffDetectSane && isAutoSpawnerActive)
-                activeCheats.add("§cStern-Erkennung unplausibel §8(" + staffSaneHits + "/" + staffSaneTotal + ") §7– nur Text");
+                activeCheats.add("§cStern-Erkennung unplausibel §8(" + staffSaneHits + "/" + staffSaneTotal + ") §7– Guard haelt still");
+            if (guardHoldUnsafe)
+                activeCheats.add("§4Spieler in der Nähe §7– kein Abbau, Staff nicht sicher erkennbar");
 
             if (activeCheats.isEmpty()) return;
 
@@ -3066,9 +3082,39 @@ public class Krypton implements ModInitializer {
     // Media/YouTuber/Partner können nicht bannen – vor denen soll der Guard
     // die Spawner ganz normal sichern und ausloggen, nicht "still halten".
     private static final String[] NON_STAFF_KEYWORDS = {
-        "media", "youtube", "youtuber", "yt", "streamer", "twitch", "tiktok",
+        "media", "youtube", "youtuber", "streamer", "twitch", "tiktok",
         "creator", "content", "partner", "famous", "influencer"
     };
+    // Kurze Media-Kuerzel, die NUR am WORTENDE zaehlen duerfen.
+    //
+    // "yt" stand frueher in der Liste oben und wurde mit contains() gesucht –
+    // ueber den KOMPLETTEN Tab-/Team-Text inklusive Spielername. Damit traf es
+    // in Krypton, Mythic, Skyter, Flyte ... und schaltete dort die
+    // Staff-Erkennung ab: ein Admin mit solchem Namen galt als Media, der Guard
+    // haette vor ihm abgebaut und sich ausgeloggt. Das ist die teure
+    // Fehlerrichtung.
+    //
+    // Am Wortende ist das Kuerzel dagegen eindeutig ein Media-Tag
+    // ("BluqoYT", "LukyGamerTV") und trifft keinen normalen Namen.
+    private static final String[] NON_STAFF_SUFFIXES = { "yt", "tv" };
+
+    /**
+     * true, wenn eines der Kuerzel am Wortende steht, also nicht unmittelbar von
+     * einem weiteren Buchstaben gefolgt wird.
+     *   "bluqoyt"  -> Treffer (Ende)      "krypton" -> kein Treffer ("yt" + "o")
+     *   "gamertv"  -> Treffer (Ende)      "mythic"  -> kein Treffer ("yt" + "h")
+     */
+    private static boolean matchesAnySuffix(String lower, String[] suffixes) {
+        for (String suf : suffixes) {
+            int from = 0, idx;
+            while ((idx = lower.indexOf(suf, from)) >= 0) {
+                int after = idx + suf.length();
+                if (after >= lower.length() || !Character.isLetter(lower.charAt(after))) return true;
+                from = idx + 1;
+            }
+        }
+        return false;
+    }
 
     /**
      * Endgültiges Urteil: Staff ja/nein (+ Label).
@@ -3079,7 +3125,10 @@ public class Krypton implements ModInitializer {
      */
     static String rankOf(RankSources s) {
         String text = staffTextRanks ? textRankOf(s) : "";
-        if (text.isEmpty() && matchesAny(combinedRankText(s), NON_STAFF_KEYWORDS)) return "";
+        if (text.isEmpty()) {
+            String all = combinedRankText(s);
+            if (matchesAny(all, NON_STAFF_KEYWORDS) || matchesAnySuffix(all, NON_STAFF_SUFFIXES)) return "";
+        }
         if (staffDetectSane) {
             String r = starRankOf(s);
             if (!r.isEmpty()) return r;

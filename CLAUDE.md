@@ -272,9 +272,14 @@ funktionieren würde, statt es erst zu merken, wenn der Gegner da ist.
 arbeiten (Körper eingefroren). Bisher war er dort schlicht aus. Jetzt: Fremder in 40 Blöcken
 → Freecam wird beendet, der Guard-Block läuft im selben Tick.
 
-**Spitzhacke aus dem Inventar (State 1):** Liegt keine Spitzhacke in der Hotbar, holt der
-Guard sie per `SlotActionType.SWAP` (Vanilla-Zifferntasten-Paket) aus dem Hauptinventar in den
-aktuellen Slot — Silk Touch bevorzugt, ein Versuch pro Einsatz (`guardSwapTried`).
+**Spitzhacke muss in der HOTBAR liegen.** Der Guard kann nur per
+`setSelectedSlot()` wählen. Früher holte er eine fehlende Spitzhacke per
+`SlotActionType.SWAP` aus dem Hauptinventar — dieses Paket schickt ein
+Vanilla-Client aber **ausschließlich bei offenem Inventar** (Zifferntaste über
+einem Slot). Bei geschlossenem Inventar nimmt der Server es zwar an (syncId 0 ist
+immer gültig), es ist aber ein Verhalten, das kein normaler Client zeigt.
+Deshalb ist der Griff raus; stattdessen meldet die Bereitschaftsprüfung vorher
+`Spitzhacke liegt im Inventar, nicht in der Hotbar`.
 
 **Spielererkennung** (Distanz² < 1600, also 40 Blöcke):
 - Whitelist-Spieler werden übersprungen.
@@ -715,6 +720,21 @@ Stern-Erkennung als kaputt markiert und ignoriert. Es bleibt die
 Klartext-Erkennung, und im HUD steht `§cStern-Erkennung unplausibel (n/m) – nur
 Text`. Lieber eine sichtbare Warnung als ein stillschweigend abgeschalteter
 Schutz.
+
+**Ist die Erkennung unplausibel, hält der Guard still.** Früher blieb in dem
+Fall nur die Klartext-Erkennung — auf einem Server, dessen Team ausschließlich
+farbige Sterne benutzt, wäre Staff damit **unsichtbar** gewesen und der Guard
+hätte vor einem Admin abgebaut und sich ausgeloggt. Jetzt wird bei
+`staffDetectSane == false` kein Spieler mehr als Gegner behandelt
+(`guardHoldUnsafe`), das HUD zeigt `Spieler in der Nähe – kein Abbau, Staff nicht`
+`sicher erkennbar`. Ein Ban ist teurer als ein verlorener Spawner.
+
+**Kurze Media-Kürzel nur am Wortende (`NON_STAFF_SUFFIXES`).** `yt` stand früher
+in `NON_STAFF_KEYWORDS` und wurde mit `contains()` über den **gesamten** Tab-Text
+inklusive Spielername gesucht. Damit traf es in `Krypton`, `Mythic`, `Skyter`,
+`Flyte` … und schaltete dort die Staff-Erkennung ab — ein Admin mit solchem Namen
+galt als Media. Jetzt zählen `yt` und `tv` nur, wenn ihnen **kein Buchstabe**
+folgt: `BluqoYT` und `LukyGamerTV` treffen weiter, `Krypton` und `Mythic` nicht.
 
 **Deko-Farben je Familie verwerfen (`staffFamilyDeko`) — die präzisere Stufe.**
 Die Notbremse oben schaltet die Stern-Erkennung *komplett* ab. Feiner geht es
