@@ -307,7 +307,7 @@ Gibt es keinen erreichbaren Spawner, zeigt das HUD
 | 2 | Auf den Spawner drehen (siehe Rotation unten) | — |
 | 3 | Warten bis der Sneak serverseitig anliegt (`player.isSneaking()`), Notausstieg nach 10 Ticks | 1–2 |
 | 4 | `attackKey` drücken, `isMining = true`, `guardAimFailTicks = 0` | — |
-| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1). Nach jedem zerbrochenen Block **3–8 Ticks Pause mit losgelassener Taste** (siehe unten) | — |
+| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1). Nach jedem zerbrochenen Block **8–13 Ticks Pause mit mechanisch losgelassener Taste** (siehe unten) | — |
 
 **Rotation (State 2):** Zielwinkel aus `atan2`. Es wird ein
 **GCD-Snapping** angewendet, das die Vanilla-Mausbewegung nachbildet:
@@ -383,14 +383,33 @@ Erkannt wird der Bruch stattdessen an `interactionManager.isBreakingBlock()`:
 Vanilla setzt `breakingBlock = false` (plus 5 Ticks `blockBreakingCooldown`)
 genau in dem Tick, in dem `currentBreakingProgress` 1.0 erreicht — unabhängig
 davon, was danach an der Position steht. Fällt das Flag, wird
-`guardReleaseTicks = 3 + rand(6)` gesetzt: 3–8 Ticks (150–400 ms, zufällig)
-ohne gedrückte Taste und **ohne Abbau-Paket**. Danach startet der nächste Abbau
-mit einem frischen `START_DESTROY_BLOCK`, also einem sauber getrennten Klick.
+`guardReleaseTicks = 8 + rand(6)` gesetzt: 8–13 Ticks ohne gedrückte Taste und
+ohne Abbau-Paket. Dazu kommen Vanillas 5 Ticks `blockBreakingCooldown`, die nach
+einem Bruch ohnehin laufen — effektiv **650–900 ms**. Kürzer reicht auf einem
+vollen Server nicht: das nächste Exemplar des Stacks kommt erst mit der Antwort
+des Servers an, bis dahin steht an der Position clientseitig Luft. Danach startet
+der nächste Abbau mit einem frischen `START_DESTROY_BLOCK`, also einem sauber
+getrennten Klick.
+
+Losgelassen wird **mechanisch**, nicht nur als Flag: `setAttackPressed()` setzt
+neben dem Instanzfeld auch `KeyBinding.setKeyPressed(Key, boolean)` — genau den
+statischen Pfad, den Vanilla in `Mouse.onMouseButton` / `Keyboard.onKey` aufruft.
+Zusätzlich läuft `cancelBlockBreaking()` wie in Vanillas
+`handleBlockBreaking(false)`. Damit ist der Tastenzustand an jeder Stelle
+konsistent, die ihn abfragt.
 
 > **Nur ZWISCHEN Blöcken loslassen.** `cancelBlockBreaking()` setzt
 > `currentBreakingProgress` auf 0 zurück. Eine Pause *mitten* im Abbau hätte zur
 > Folge, dass der Spawner nie fertig wird. Deshalb hängt die Pause strikt am
 > erkannten Blockbruch und nicht an einem festen Intervall.
+
+**Safety-Logout-Karenz (`guardSinceBreakTicks`).** Direkt nach einem Bruch ist
+die Position für ein paar Ticks leer, bis der Server das nächste Exemplar des
+Stacks schickt. `findReachableSpawner()` findet in dieser Lücke nichts — ohne
+Gegenmaßnahme würde der Guard "keine Spawner mehr" schließen und **mitten im**
+**Stack ausloggen**, obwohl noch Dutzende dastehen. Deshalb startet der
+Safety-Logout-Timer erst, wenn der letzte Blockbruch **mehr als 60 Ticks (3 s)**
+her ist.
 
 
 **Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),

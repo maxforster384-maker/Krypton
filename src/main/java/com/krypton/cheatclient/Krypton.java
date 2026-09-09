@@ -278,14 +278,24 @@ public class Krypton implements ModInitializer {
     // gedrueckt, und der Server sah einen einzigen, nie endenden Klick. Der
     // Abbau des naechsten Exemplars wurde damit nicht mehr registriert.
     //
-    // Die Pause ist bewusst zufaellig lang (3-8 Ticks = 150-400 ms), damit kein
-    // exaktes Intervall entsteht.
+    // Die Pause dauert 8-13 Ticks (zufaellig, damit kein exaktes Intervall
+    // entsteht). Dazu kommen Vanillas 5 Ticks blockBreakingCooldown, die nach
+    // einem Bruch ohnehin laufen – effektiv also 13-18 Ticks = 650-900 ms.
+    // Kuerzer reicht auf einem vollen Server nicht: das naechste Exemplar des
+    // Stacks kommt erst mit der Antwort des Servers an, und bis dahin steht an
+    // der Position clientseitig Luft.
     //
     // WICHTIG: NUR zwischen Bloecken loslassen. cancelBlockBreaking() setzt
     // currentBreakingProgress auf 0 zurueck – eine Pause mitten im Abbau haette
     // zur Folge, dass der Spawner nie fertig wird.
     private static int guardReleaseTicks = 0;
     private static boolean guardWasBreaking = false;
+    // Ticks seit dem letzten erfolgreichen Blockbruch.
+    // Schuetzt den Safety-Logout: bei gestackten Spawnern ist die Position fuer
+    // ein paar Ticks leer, bis der Server das naechste Exemplar schickt. Ohne
+    // Karenzzeit wuerde der Guard genau in dieser Luecke "keine Spawner mehr"
+    // sehen und mitten im Stack ausloggen, obwohl noch Dutzende da sind.
+    private static int guardSinceBreakTicks = 9999;
     // Gegner in Reichweite, aber KEIN Spawner, den der Guard von hier aus
     // treffen kann (alle >4,5 Blöcke entfernt oder verdeckt). Der Guard kann
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
@@ -909,6 +919,28 @@ public class Krypton implements ModInitializer {
         if (k.isPressed() == pressed) return;
         k.setPressed(pressed);
         if (k.isPressed() != pressed) k.setPressed(true);
+    }
+
+    /**
+     * Setzt die Angriffs-/Abbau-Taste so, wie es ein echter Maus- bzw.
+     * Tastendruck tun wuerde.
+     *
+     * Zusaetzlich zum Instanzfeld (setPressed) wird der statische Pfad
+     * KeyBinding.setKeyPressed(Key, boolean) bedient – genau den ruft Vanilla in
+     * Mouse.onMouseButton / Keyboard.onKey auf. Damit ist der Tastenzustand an
+     * JEDER Stelle konsistent, die ihn abfragt, und ein Loslassen ist wirklich
+     * ein Loslassen und nicht nur ein umgesetztes Flag.
+     */
+    private static void setAttackPressed(MinecraftClient client, boolean pressed) {
+        if (client == null || client.options == null) return;
+        KeyBinding k = client.options.attackKey;
+        k.setPressed(pressed);
+        try {
+            InputUtil.Key key = getBoundKey(k);
+            if (key != null && key.getCode() != GLFW.GLFW_KEY_UNKNOWN) {
+                KeyBinding.setKeyPressed(key, pressed);
+            }
+        } catch (Exception ignored) {}
     }
 
     private static void applyForceSneak(MinecraftClient client) {
@@ -1789,7 +1821,7 @@ public class Krypton implements ModInitializer {
                         // sneakKey wird bewusst NICHT angefasst: applyForceSneak()
                         // stellt im nächsten Tick den echten Tastenzustand wieder her.
                         isAutoSpawnerActive = false;
-                        client.options.attackKey.setPressed(false);
+                        setAttackPressed(client,false);
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                         isMining = false;
                         hasMinedSpawner = false;
@@ -1823,10 +1855,11 @@ public class Krypton implements ModInitializer {
                 // Gegner da, aber nichts Abbaubares in Sicht und noch nichts
                 // abgebaut → der Guard ist wirkungslos. Sichtbar machen (HUD).
                 guardNoReachableSpawner = enemyFound && spawnerPos == null && !hasMinedSpawner;
+                if (guardSinceBreakTicks < 9999) guardSinceBreakTicks++;
 
                 if (isMining && lastTargetSpawner != null) {
                     if (!client.world.getBlockState(lastTargetSpawner).isOf(Blocks.SPAWNER)) {
-                        client.options.attackKey.setPressed(false);
+                        setAttackPressed(client,false);
                         isMining = false;
                         guardAimFailTicks = 0;
                         autoSpawnerState = 0;
@@ -1950,7 +1983,7 @@ public class Krypton implements ModInitializer {
                             break;
 
                         case 4:
-                            client.options.attackKey.setPressed(true);
+                            setAttackPressed(client,true);
                             isMining = true;
                             guardAimFailTicks = 0;
                             guardReleaseTicks = 0;
@@ -1965,10 +1998,17 @@ public class Krypton implements ModInitializer {
                             // also mit einem sauber getrennten neuen Klick.
                             if (guardReleaseTicks > 0) {
                                 guardReleaseTicks--;
-                                client.options.attackKey.setPressed(false);
+                                setAttackPressed(client,false);
+                                // Vollstaendiges Loslassen wie in Vanilla: dort ruft
+                                // handleBlockBreaking(false) cancelBlockBreaking() auf.
+                                // Nach einem fertigen Bruch ist breakingBlock bereits
+                                // false, es geht also kein ABORT-Paket raus – der
+                                // Aufruf raeumt nur einen evtl. angefangenen Abbau ab.
+                                if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
+                                guardWasBreaking = false;
                                 break;
                             }
-                            client.options.attackKey.setPressed(true);
+                            setAttackPressed(client,true);
 
                             // Brownian-Motion-Drift: random walk mit Mean-Reversion
                             // kein sinusoidales Muster mehr das AC erkennen könnte
@@ -2013,8 +2053,9 @@ public class Krypton implements ModInitializer {
                                 // im Gegensatz zur reinen "ist kein Spawner mehr"-Pruefung.
                                 boolean breakingNow = client.interactionManager.isBreakingBlock();
                                 if (guardWasBreaking && !breakingNow) {
-                                    guardReleaseTicks = 3 + (int)(Math.random() * 6);
-                                    client.options.attackKey.setPressed(false);
+                                    guardSinceBreakTicks = 0;
+                                    guardReleaseTicks = 8 + (int)(Math.random() * 6);
+                                    setAttackPressed(client,false);
                                 }
                                 guardWasBreaking = breakingNow;
                             } else {
@@ -2027,7 +2068,7 @@ public class Krypton implements ModInitializer {
                                     // greift, statt für immer in State 5 zu hängen.
                                     guardAimFailTicks = 0;
                                     isMining = false;
-                                    client.options.attackKey.setPressed(false);
+                                    setAttackPressed(client,false);
                                     // Merken – sonst wählt die Suche im nächsten Tick
                                     // exakt dieses Ziel wieder und die Schleife beginnt von vorn.
                                     if (lastTargetSpawner != null) guardFailedTargets.add(lastTargetSpawner);
@@ -2042,7 +2083,14 @@ public class Krypton implements ModInitializer {
                     }
 
                 } else if (hasMinedSpawner && spawnerPos == null) {
-                    if (safetyLogoutTimer == -1) {
+                    // Karenz nach einem Blockbruch: bei gestackten Spawnern ist die
+                    // Position kurz leer, bis der Server das naechste Exemplar
+                    // schickt. Ohne diese 3 Sekunden wuerde der Guard genau in der
+                    // Luecke "keine Spawner mehr" sehen und mitten im Stack
+                    // ausloggen, obwohl noch Dutzende dastehen.
+                    if (guardSinceBreakTicks < 60) {
+                        safetyLogoutTimer = -1;
+                    } else if (safetyLogoutTimer == -1) {
                         safetyLogoutTimer = 8 + (int)(Math.random() * 17);
                     }
 
@@ -2050,7 +2098,7 @@ public class Krypton implements ModInitializer {
                         safetyLogoutTimer--;
                     } else if (safetyLogoutTimer == 0) {
                         if (isMining) {
-                            client.options.attackKey.setPressed(false);
+                            setAttackPressed(client,false);
                             isMining = false;
                         }
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -2083,7 +2131,7 @@ public class Krypton implements ModInitializer {
                     guardSneakWaitTicks = 0;
                     guardFailedTargets.clear();
                     if (isMining) {
-                        client.options.attackKey.setPressed(false);
+                        setAttackPressed(client,false);
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                         isMining = false;
                     }
@@ -2101,7 +2149,7 @@ public class Krypton implements ModInitializer {
                 guardFailedTargets.clear();
                 guardNoReachableSpawner = false;
                 if (isMining) {
-                    client.options.attackKey.setPressed(false);
+                    setAttackPressed(client,false);
                     if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
                     isMining = false;
                 }
@@ -2349,7 +2397,7 @@ public class Krypton implements ModInitializer {
 
             // SPAWNER IN 5 BLÖCKEN SUCHEN + SILK TOUCH AUSWÄHLEN
             case 1: {
-                client.options.attackKey.setPressed(false);
+                setAttackPressed(client,false);
                 BlockPos nearest = null;
                 double nearestDist = Double.MAX_VALUE;
                 for (BlockPos pos : foundSpawners) {
@@ -2406,19 +2454,19 @@ public class Krypton implements ModInitializer {
             // ABBAUEN (Attack halten + Drift)
             case 3: {
                 if (spawnerScriptCurrentTarget == null || !client.world.getBlockState(spawnerScriptCurrentTarget).isOf(Blocks.SPAWNER)) {
-                    client.options.attackKey.setPressed(false);
+                    setAttackPressed(client,false);
                     spawnerScriptCurrentTarget = null;
                     spawnerScriptTimeout = 0;
                     spawnerScriptState = 4; spawnerScriptDelay = 5; break;
                 }
                 // Timeout: nach 400 Ticks (20 Sek) aufgeben
                 if (++spawnerScriptTimeout > 400) {
-                    client.options.attackKey.setPressed(false);
+                    setAttackPressed(client,false);
                     spawnerScriptCurrentTarget = null;
                     spawnerScriptTimeout = 0;
                     spawnerScriptState = 4; spawnerScriptDelay = 5; break;
                 }
-                client.options.attackKey.setPressed(true);
+                setAttackPressed(client,true);
                 spawnerScriptDriftYaw   += (float)(Math.random()-0.5)*0.05f;
                 spawnerScriptDriftPitch += (float)(Math.random()-0.5)*0.03f;
                 spawnerScriptDriftYaw   *= 0.85f; spawnerScriptDriftPitch *= 0.85f;
@@ -2435,7 +2483,7 @@ public class Krypton implements ModInitializer {
 
             // NÄCHSTEN SPAWNER IN 5 BLÖCKEN SUCHEN ODER ZU TPA WEITERGEHEN
             case 4: {
-                client.options.attackKey.setPressed(false);
+                setAttackPressed(client,false);
                 BlockPos next = null;
                 for (BlockPos pos : foundSpawners) {
                     if (client.player.squaredDistanceTo(pos.getX()+0.5, pos.getY()+0.5, pos.getZ()+0.5) <= 25.0) {
