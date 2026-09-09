@@ -301,11 +301,15 @@ public class Krypton implements ModInitializer {
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
     // in Sicherheit, während der Schutz faktisch nicht greift.
     public static boolean guardNoReachableSpawner = false;
-    // Gegner in Reichweite, aber die Stern-Erkennung ist gerade unplausibel
-    // (staffDetectSane == false). Dann laesst sich Staff nicht sicher von
-    // normalen Spielern unterscheiden – der Guard haelt still, statt blind
-    // abzubauen. Ein Ban ist teurer als ein verlorener Spawner.
-    public static boolean guardHoldUnsafe = false;
+    // Spieler in Reichweite, aber die Stern-Erkennung ist gerade unplausibel
+    // (staffDetectSane == false). Der Guard SCHUETZT dann trotzdem – im Zweifel
+    // lieber die Spawner sichern als sie sicher verlieren. Der Hinweis steht im
+    // HUD, damit der Zustand nicht unbemerkt bleibt.
+    public static boolean guardStaffUncertain = false;
+    // Warum der Guard sich selbst abgeschaltet hat (Staff gesichtet, mit Name
+    // und Uhrzeit). Bleibt stehen, bis der Spieler ihn von Hand wieder
+    // einschaltet – sonst merkt man nicht, dass der Schutz aus ist.
+    public static String guardStaffOffReason = "";
     // Laufende Bereitschaftsprüfung (alle 40 Ticks = 2 s), solange der Guard
     // scharf, aber nicht im Einsatz ist: erreichbarer Spawner? Spitzhacke?
     // Leer = bereit, sonst der Grund fürs HUD. Der Sinn: NICHT erst merken,
@@ -1838,54 +1842,67 @@ public class Krypton implements ModInitializer {
             // ====================================================
             if (isAutoSpawnerActive && client.world != null && client.player != null && !isFreecamActive) {
                 boolean enemyFound = false;
-                guardHoldUnsafe = false;
+                guardStaffUncertain = false;
 
+                // ZWEI DURCHGAENGE. Frueher war es einer, der beim ersten normalen
+                // Spieler mit break abgebrochen hat – ein Staff-Mitglied weiter
+                // hinten in der Iterationsreihenfolge wurde dann NIE geprueft und
+                // der Guard baute trotzdem ab. Staff muss aber IMMER gewinnen,
+                // egal wer sonst noch in der Naehe steht.
+                PlayerEntity staffNear = null;
+                PlayerEntity enemyNear = null;
+                double enemyDist = Double.MAX_VALUE;
                 for (PlayerEntity p : client.world.getPlayers()) {
                     if (p == client.player) continue;
                     if (whitelistedPlayers.contains(p.getName().getString().toLowerCase())) continue;
-                    if (client.player.squaredDistanceTo(p) >= 1600) continue;
+                    double d2 = client.player.squaredDistanceTo(p);
+                    if (d2 >= 1600) continue;
+                    if (!getPlayerRank(client, p).isEmpty()) { staffNear = p; break; }
+                    if (d2 < enemyDist) { enemyDist = d2; enemyNear = p; }
+                }
 
-                    String rank = getPlayerRank(client, p);
-
-                    if (!rank.isEmpty()) {
-                        // Staff → Guard aus, still halten, nichts abbauen.
-                        // sneakKey wird bewusst NICHT angefasst: applyForceSneak()
-                        // stellt im nächsten Tick den echten Tastenzustand wieder her.
-                        isAutoSpawnerActive = false;
-                        setAttackPressed(client,false);
-                        if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
-                        isMining = false;
-                        hasMinedSpawner = false;
-                        autoSpawnerState = 0;
-                        actionDelayTimer = 0;
-                        lastTargetSpawner = null;
-                        safetyLogoutTimer = -1;
-                        guardEngaged = false;
-                        guardAimFailTicks = 0;
-                        guardSneakWaitTicks = 0;
-                        guardFailedTargets.clear();
-                        break;
-                    }
-
+                if (staffNear != null) {
+                    // STAFF GESICHTET → Guard KOMPLETT aus.
+                    //
+                    // Nicht nur pausieren: ein Moderator koennte sonst gezielt einen
+                    // Spawner neben den Spieler setzen und zusehen, wie er
+                    // automatisch abgebaut wird – ein sauberer Nachweis fuer einen
+                    // Cheat-Client. Abgeschaltet bleibt er, bis der Spieler ihn von
+                    // Hand wieder einschaltet; der Grund steht so lange im HUD.
+                    //
+                    // sneakKey wird bewusst NICHT angefasst: applyForceSneak()
+                    // stellt im naechsten Tick den echten Tastenzustand wieder her.
+                    String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
+                    guardStaffOffReason = getPlayerRank(client, staffNear) + " "
+                            + staffNear.getName().getString() + " gesichtet (" + time + ")";
+                    isAutoSpawnerActive = false;
+                    saveCheatStates();   // ueberlebt auch einen Absturz
+                    setAttackPressed(client, false);
+                    if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
+                    isMining = false;
+                    hasMinedSpawner = false;
+                    autoSpawnerState = 0;
+                    actionDelayTimer = 0;
+                    lastTargetSpawner = null;
+                    safetyLogoutTimer = -1;
+                    guardEngaged = false;
+                    guardAimFailTicks = 0;
+                    guardSneakWaitTicks = 0;
+                    guardFailedTargets.clear();
+                } else if (enemyNear != null) {
                     // Normaler Spieler → abbauen + ausloggen.
                     //
-                    // ABER: Ist die Stern-Erkennung gerade unplausibel, koennen wir
-                    // Staff NICHT sicher von normalen Spielern unterscheiden. Frueher
-                    // lief in dem Fall nur noch die Klartext-Erkennung weiter – auf
-                    // einem Server, dessen Team ausschliesslich Sterne benutzt (wie
-                    // hier), waere Staff damit unsichtbar gewesen und der Guard haette
-                    // vor einem Admin abgebaut und sich ausgeloggt.
-                    // Jetzt: still halten. Ein Ban ist teurer als ein Spawner.
-                    if (!staffDetectSane) {
-                        guardHoldUnsafe = true;
-                        break;
-                    }
+                    // Ist die Stern-Erkennung gerade unplausibel, laesst sich Staff
+                    // nicht sicher von normalen Spielern unterscheiden. Im Zweifel
+                    // wird trotzdem GESCHUETZT: ein Spawner, den man sicher verliert,
+                    // wiegt schwerer als ein moegliches Risiko. Der Zustand steht
+                    // aber im HUD, damit er nicht unbemerkt bleibt.
+                    if (!staffDetectSane) guardStaffUncertain = true;
                     enemyFound = true;
                     String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
-                    int dist = (int) Math.round(Math.sqrt(client.player.squaredDistanceTo(p)));
-                    lastLogoutLog = "§cNotfall-Logout (" + time + "): §e" + p.getName().getString() + " §8| §7" + dist + " Blöcke §8| §7X:" + p.getBlockX() + " Y:" + p.getBlockY() + " Z:" + p.getBlockZ();
+                    int dist = (int) Math.round(Math.sqrt(enemyDist));
+                    lastLogoutLog = "§cNotfall-Logout (" + time + "): §e" + enemyNear.getName().getString() + " §8| §7" + dist + " Blöcke §8| §7X:" + enemyNear.getBlockX() + " Y:" + enemyNear.getBlockY() + " Z:" + enemyNear.getBlockZ();
                     saveLogs();
-                    break;
                 }
 
                 // Nur ein Spawner, der von hier aus WIRKLICH abbaubar ist (sichtbar
@@ -2284,9 +2301,11 @@ public class Krypton implements ModInitializer {
             if (wasSafetyLogout) activeCheats.add("§4Rejoin gesperrt (Notfall-Logout)");
             // Sichtbare Warnung statt stillem Schutzverlust
             if (!staffDetectSane && isAutoSpawnerActive)
-                activeCheats.add("§cStern-Erkennung unplausibel §8(" + staffSaneHits + "/" + staffSaneTotal + ") §7– Guard haelt still");
-            if (guardHoldUnsafe)
-                activeCheats.add("§4Spieler in der Nähe §7– kein Abbau, Staff nicht sicher erkennbar");
+                activeCheats.add("§cStern-Erkennung unplausibel §8(" + staffSaneHits + "/" + staffSaneTotal + ") §7– nur Text");
+            if (guardStaffUncertain)
+                activeCheats.add("§eStaff nicht sicher erkennbar §7– Guard schützt trotzdem");
+            if (!guardStaffOffReason.isEmpty())
+                activeCheats.add("§4GUARD AUS §7– " + guardStaffOffReason);
 
             if (activeCheats.isEmpty()) return;
 
@@ -3985,6 +4004,7 @@ public class Krypton implements ModInitializer {
                 case 0  -> { isFreecamActive       = !isFreecamActive;       toggleFreecam(client); }
                 case 1  -> {
                     isAutoSpawnerActive = !isAutoSpawnerActive;
+                    guardStaffOffReason = "";   // Hinweis quittieren
                     if (isAutoSpawnerActive) {
                         // Guard an = AFK-Betrieb. Ohne Auto Reconnect + Session Fix stünde
                         // der Client nach dem ersten Kick im Menü, bis jemand hinschaut –

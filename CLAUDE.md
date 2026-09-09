@@ -282,6 +282,19 @@ Deshalb ist der Griff raus; stattdessen meldet die Bereitschaftsprüfung vorher
 `Spitzhacke liegt im Inventar, nicht in der Hotbar`.
 
 **Spielererkennung** (Distanz² < 1600, also 40 Blöcke):
+
+Die Prüfung läuft in **zwei Durchgängen**. Vorher war es einer, der beim ersten
+normalen Spieler abbrach — ein Staff-Mitglied weiter hinten in der
+Iterationsreihenfolge wurde dann **nie geprüft** und der Guard baute trotzdem ab.
+Jetzt gewinnt Staff **immer**, egal wer sonst in der Nähe steht.
+
+Wird Staff gesichtet, schaltet sich der Guard **komplett ab** (nicht nur Pause)
+und `saveCheatStates()` schreibt das sofort weg. Grund: ein Moderator könnte
+sonst gezielt einen Spawner neben den Spieler setzen und zusehen, wie er
+automatisch abgebaut wird — ein sauberer Nachweis für einen Cheat-Client. Der
+Guard bleibt aus, bis er von Hand wieder eingeschaltet wird; solange steht
+`GUARD AUS – <Rang> <Name> gesichtet (Uhrzeit)` im HUD
+(`guardStaffOffReason`).
 - Whitelist-Spieler werden übersprungen.
 - **Staff erkannt** (`getPlayerRank()` liefert nicht-leer) → Guard schaltet sich
   **selbst ab**, Attack los, `cancelBlockBreaking()`, alle States zurück.
@@ -721,13 +734,10 @@ Klartext-Erkennung, und im HUD steht `§cStern-Erkennung unplausibel (n/m) – n
 Text`. Lieber eine sichtbare Warnung als ein stillschweigend abgeschalteter
 Schutz.
 
-**Ist die Erkennung unplausibel, hält der Guard still.** Früher blieb in dem
-Fall nur die Klartext-Erkennung — auf einem Server, dessen Team ausschließlich
-farbige Sterne benutzt, wäre Staff damit **unsichtbar** gewesen und der Guard
-hätte vor einem Admin abgebaut und sich ausgeloggt. Jetzt wird bei
-`staffDetectSane == false` kein Spieler mehr als Gegner behandelt
-(`guardHoldUnsafe`), das HUD zeigt `Spieler in der Nähe – kein Abbau, Staff nicht`
-`sicher erkennbar`. Ein Ban ist teurer als ein verlorener Spawner.
+**Ist die Erkennung unplausibel, schützt der Guard trotzdem.** Ein sicher
+verlorener Spawner wiegt schwerer als ein mögliches Risiko. Das HUD zeigt dann
+`Staff nicht sicher erkennbar – Guard schützt trotzdem` (`guardStaffUncertain`),
+damit der Zustand nicht unbemerkt bleibt.
 
 **Kurze Media-Kürzel nur am Wortende (`NON_STAFF_SUFFIXES`).** `yt` stand früher
 in `NON_STAFF_KEYWORDS` und wurde mit `contains()` über den **gesamten** Tab-Text
