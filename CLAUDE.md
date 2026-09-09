@@ -307,7 +307,7 @@ Gibt es keinen erreichbaren Spawner, zeigt das HUD
 | 2 | Auf den Spawner drehen (siehe Rotation unten) | — |
 | 3 | Warten bis der Sneak serverseitig anliegt (`player.isSneaking()`), Notausstieg nach 10 Ticks | 1–2 |
 | 4 | `attackKey` drücken, `isMining = true`, `guardAimFailTicks = 0` | — |
-| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1) | — |
+| 5 | Brownian-Drift + **eigener Abbau** (siehe §5.4.1). Nach jedem zerbrochenen Block **3–8 Ticks Pause mit losgelassener Taste** (siehe unten) | — |
 
 **Rotation (State 2):** Zielwinkel aus `atan2`. Es wird ein
 **GCD-Snapping** angewendet, das die Vanilla-Mausbewegung nachbildet:
@@ -371,6 +371,27 @@ Blöcke, die ein Raycast in echter Blickrichtung innerhalb von
 Zielwahl — vorher konnte der Guard einen Spawner aus der Würfelecke (bis 6,9
 Blöcke) wählen, den der Abbau-Raycast nie traf: anvisieren → Fehlschlag →
 dasselbe Ziel → Endlosschleife ohne einen einzigen Schlag.
+
+**Taste zwischen den Blöcken loslassen — sonst bricht der Guard nach dem
+ersten Spawner ab.** Bei **gestackten** Spawnern (DonutSMP) rückt sofort das
+nächste Exemplar an dieselbe Position nach: der Blockzustand bleibt `SPAWNER`.
+Die Bruch-Erkennung über "Block ist kein Spawner mehr" löst deshalb **nie** aus,
+die Abbau-Taste bleibt gedrückt, und der Server sieht einen einzigen, nie
+endenden Klick — der Abbau des nächsten Exemplars wird nicht mehr registriert.
+
+Erkannt wird der Bruch stattdessen an `interactionManager.isBreakingBlock()`:
+Vanilla setzt `breakingBlock = false` (plus 5 Ticks `blockBreakingCooldown`)
+genau in dem Tick, in dem `currentBreakingProgress` 1.0 erreicht — unabhängig
+davon, was danach an der Position steht. Fällt das Flag, wird
+`guardReleaseTicks = 3 + rand(6)` gesetzt: 3–8 Ticks (150–400 ms, zufällig)
+ohne gedrückte Taste und **ohne Abbau-Paket**. Danach startet der nächste Abbau
+mit einem frischen `START_DESTROY_BLOCK`, also einem sauber getrennten Klick.
+
+> **Nur ZWISCHEN Blöcken loslassen.** `cancelBlockBreaking()` setzt
+> `currentBreakingProgress` auf 0 zurück. Eine Pause *mitten* im Abbau hätte zur
+> Folge, dass der Spawner nie fertig wird. Deshalb hängt die Pause strikt am
+> erkannten Blockbruch und nicht an einem festen Intervall.
+
 
 **Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),
 zählt `guardAimFailTicks`. Nach 5 Ticks geht es zurück in State 2 (neu
@@ -664,6 +685,22 @@ Klartext-Erkennung, und im HUD steht `§cStern-Erkennung unplausibel (n/m) – n
 Text`. Lieber eine sichtbare Warnung als ein stillschweigend abgeschalteter
 Schutz.
 
+**Deko-Farben je Familie verwerfen (`staffFamilyDeko`) — die präzisere Stufe.**
+Die Notbremse oben schaltet die Stern-Erkennung *komplett* ab. Feiner geht es
+pro Farbfamilie: Staff ist auf jedem Server eine kleine **Minderheit** (auf
+DonutSMP trägt den echten Stern 1 von 80 Spielern = 1 %), Deko trägt fast jeder
+(97 %). `updateStaffSanity()` zählt deshalb alle 40 Ticks über die komplette
+Tab-Liste, wie viele Spieler einen Stern **je Farbfamilie** tragen. Liegt eine
+Familie über **15 %** (ab **8** Spielern Stichprobe), kann sie kein Rang-Marker
+sein und wird ignoriert — nur diese eine Farbe, die echten Rang-Farben bleiben
+aktiv. Gezählt wird bewusst **ohne** Deko-Filter (`rawStarFamilies()`), sonst
+wäre die Rechnung zirkulär.
+
+Das ist der Schutz davor, dass normale Spieler oder Media als Staff gelten und
+der Guard sich abschaltet. Der Staff-Scan zeigt oben, welche Familien verworfen
+wurden (`Als Deko verworfen (zu häufig für einen Rang): …`).
+
+
 **Eigene Glyphen (`krypton_staffglyphs.txt`).** Viele Server benutzen
 Resourcepack-Symbole aus der **Private Use Area** (U+E000–U+F8FF), die in keiner
 Unicode-Sternliste stehen. Über die Datei lässt sich jeder Codepoint nachtragen
@@ -938,7 +975,7 @@ C_DASH     0xFF3A4050   C_ROW_HOV  0x14FFFFFF
 | `WhitelistScreen` | Liste mit Hover-Highlight, Klick = entfernen; Textfeld + "+" |
 | `HoleSizeScreen` | Eigenes Fenster für `minHoleSize` (1–100), Alternative zur Inline-Eingabe |
 | `DisconnectLogScreen` | Letzte 20 Trenngründe (`disconnectHistory`) mit Uhrzeit, Kategorie und ausgeführter Aktion; skaliert auf Breite **und** Höhe. Buttons: "Modus" (schaltet `sessionFixMode` weiter), "Log löschen", "Zurück". `shouldPause()` = `false`. |
-| `StaffScanScreen` | **Rang-Diagnose, zwei Ansichten.** *Glyphen:* zählt jedes Sonderzeichen aus allen Tab-/Team-Prefixes über die **komplette Tab-Liste** (nicht nur geladene Entities), sortiert nach Häufigkeit, mit Codepoint, Hex-Farbe, Familie, Trefferzahl/Prozent und Urteil. Ein Symbol bei ≥50 % ist markiert als `<- DEKO!`, eines bei ≤2 Spielern als `<- verdächtig selten` (plus deren Namen). Das ist der Weg, den echten Rang-Marker zu finden. *Spieler:* Listet jeden Spieler der Tab-Liste (geladene zuerst, dann nach Distanz; nicht geladene mit `nur Tab`): Name, Distanz, Whitelist-Marker, Urteil (`STAFF: <Rang>` / `kein Staff`) und darunter je eine Zeile pro Quelle (Tab, Name, Team-Prefix, Team-Suffix) mit dem Rohtext (`§` → `&` sichtbar gemacht) und jedem gefundenen Stern als `U+XXXX #RRGGBB <Familie> [STAFF]/[egal]`. 15 Zeilen pro Seite, `<`/`>` blättert, "Aktualisieren" scannt neu. Fünf Schalter (Grün/Blau/Lila/Andere/Text) ändern die Erkennung sofort und speichern nach `krypton_staffdetect.txt`. `shouldPause()` = `false`. |
+| `StaffScanScreen` | **Rang-Diagnose, zwei Ansichten.** *Glyphen:* zählt jedes Sonderzeichen aus allen Tab-/Team-Prefixes über die **komplette Tab-Liste** (nicht nur geladene Entities), sortiert nach Häufigkeit, mit Codepoint, Hex-Farbe, Familie, Trefferzahl/Prozent und Urteil. Ein Symbol bei ≥50 % ist markiert als `<- DEKO!`, eines bei ≤2 Spielern als `<- verdächtig selten` (plus deren Namen). Das ist der Weg, den echten Rang-Marker zu finden. *Spieler:* Listet jeden Spieler der Tab-Liste (geladene zuerst, dann nach Distanz; nicht geladene mit `nur Tab`): Name, Distanz, Whitelist-Marker, Urteil (`STAFF: <Rang>` / `kein Staff`) und darunter je eine Zeile pro Quelle (Tab, Name, Team-Prefix, Team-Suffix) mit dem Rohtext (`§` → `&` sichtbar gemacht) und jedem gefundenen Stern als `U+XXXX #RRGGBB <Familie> [STAFF]/[egal]`. 15 Zeilen pro Seite, `<`/`>` blättert, "Aktualisieren" scannt neu. Kopfzeile nennt zusätzlich die als Deko verworfenen Farbfamilien mit Trefferzahl. Fünf Schalter (Grün/Blau/Lila/Andere/Text) ändern die Erkennung sofort und speichern nach `krypton_staffdetect.txt`. `shouldPause()` = `false`. |
 
 ---
 
