@@ -1301,6 +1301,23 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
   `maven.fabricmc.net`, siehe §11), zumindest `javac` über die Quellen laufen
   lassen — Syntaxfehler fallen dabei auf, auch wenn alle MC-Symbole fehlen —
   und danach den CI-Build auf GitHub abwarten.
+- **Verpflichtender Abschluss nach jeder erfolgreichen Bearbeitung:**
+  1. Diff und betroffene Funktionen auf Nebenwirkungen prüfen; `AGENTS.md` und
+     `CLAUDE.md` bei relevanten Änderungen synchron aktualisieren.
+  2. Mit JDK 25 gegen das Java-21-Release-Target `./gradlew build` ausführen.
+     Bei einem Buildfehler weder installieren noch committen/pushen, sondern den
+     Fehler zuerst beheben oder klar als Blocker melden.
+  3. Ausschließlich `build/libs/krypton-1.0.0.jar` (niemals die
+     `-sources.jar`) nach
+     `C:\Users\maxfo\AppData\Roaming\norisk\NoRiskClientV3\data\profiles\Fabric 1.21.11\custom\_mods\krypton-1.0.0.jar`
+     kopieren und dabei eine vorhandene ältere Krypton-JAR ersetzen. Fehlende
+     Zielordner dürfen angelegt werden. Anschließend Quelle und Ziel per Größe
+     oder SHA-256 vergleichen.
+  4. Nur die zur Aufgabe gehörenden Dateien stagen, mit einer passenden
+     deutschen Commit-Nachricht committen und automatisch auf den aktuellen
+     Upstream-Branch pushen. Dafür nicht noch einmal nachfragen; den Remote-Stand
+     danach verifizieren. Lokale Runtime-Dateien, Persistenzdateien und Secrets
+     niemals versehentlich mit committen.
 - **Guard-Änderungen sind sicherheitskritisch.** Beim Anfassen von §5.4 immer
   mitdenken: Kann noch abgebaut werden, wenn ein Screen offen ist / das Fenster
   keinen Fokus hat? Kann sich der User den Guard noch ausschalten? Bleibt der
