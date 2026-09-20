@@ -1,7 +1,7 @@
-# CLAUDE.md — Krypton Client
+# AGENTS.md — Krypton Client
 
 Vollständige technische Dokumentation des Projekts. Diese Datei ist die primäre
-Kontext-Referenz für Claude Code und für jeden Entwickler, der am Projekt arbeitet.
+Kontext-Referenz für Codex und für jeden Entwickler, der am Projekt arbeitet.
 
 ---
 
@@ -47,7 +47,7 @@ Krypton-Client/
 ├── .gitattributes
 ├── LICENSE                       CC0
 ├── README.md                     Fabric-Template-Default (noch nicht angepasst)
-├── CLAUDE.md                     ← diese Datei
+├── AGENTS.md                     ← diese Datei
 ├── .claude/
 │   ├── launch.json               Preview-Server-Configs (projektfremd, Altlast)
 │   └── settings.local.json       Lokale Permission-Allowlist
@@ -1275,7 +1275,7 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
 
 ---
 
-## 12. Arbeitshinweise für Claude
+## 12. Arbeitshinweise für Codex
 
 - **Sprache:** Kommentare und Nutzer-Strings auf Deutsch, passend zum Bestand.
 - **Stil:** Der bestehende Code nutzt kompakte Zeilen, `switch`-Expressions und
