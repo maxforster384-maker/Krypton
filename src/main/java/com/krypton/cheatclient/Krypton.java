@@ -52,7 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class Krypton implements ModInitializer {
 
     // Im Log des AFK-PCs eindeutig erkennbar, auch wenn die Mod-Version gleich bleibt.
-    private static final String GUARD_BUILD = "guard-presence-2026-09-25";
+    private static final String GUARD_BUILD = "guard-clearance-2026-09-25";
 
     private static void guardAudit(String event) {
         System.out.println("[Krypton " + GUARD_BUILD + "] " + event);
@@ -1202,35 +1202,6 @@ public class Krypton implements ModInitializer {
         return best;
     }
 
-    // Ein unerreichbarer Spawner darf nicht als "gesichert" gelten. Die Suche
-    // benutzt denselben 9x9x9-Bereich wie die Zielwahl, aber ohne Sichtfilter.
-    private static boolean hasNearbySpawner(MinecraftClient client) {
-        if (client.world == null || client.player == null) return false;
-        BlockPos base = client.player.getBlockPos();
-        for (int x = -4; x <= 4; x++) {
-            for (int y = -4; y <= 4; y++) {
-                for (int z = -4; z <= 4; z++) {
-                    if (client.world.getBlockState(base.add(x, y, z)).isOf(Blocks.SPAWNER)) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    // Ein Spawner im Schutzradius, aber ausserhalb der 4,5-Block-Reichweite,
-    // kann nicht abgebaut werden und darf niemals als "gesichert" gelten.
-    private static boolean hasVisibleSpawnerInGuardArea(MinecraftClient client) {
-        if (client.world == null || client.player == null) return false;
-        for (BlockPos pos : foundSpawners) {
-            double dx = pos.getX() + 0.5 - client.player.getX();
-            double dy = pos.getY() + 0.5 - client.player.getY();
-            double dz = pos.getZ() + 0.5 - client.player.getZ();
-            if (dx * dx + dy * dy + dz * dz >= 1600) continue;
-            if (client.world.getBlockState(pos).isOf(Blocks.SPAWNER)) return true;
-        }
-        return false;
-    }
-
     private static BlockHitResult guardRaycastTarget(MinecraftClient client, BlockPos target) {
         if (client.world == null || client.player == null || target == null) return null;
         Vec3d start = client.player.getEyePos();
@@ -2284,7 +2255,8 @@ public class Krypton implements ModInitializer {
                 } else if (guardContinuing && spawnerPos == null) {
                     if (!guardNoTargetLogged) {
                         guardAudit("Kein erreichbares Abbauziel; Gegner noch da="
-                                + guardEnemySeenLastTick + ", Abbaue=" + guardCompletedBreaks);
+                                + guardEnemySeenLastTick + ", Abbaue=" + guardCompletedBreaks
+                                + ", Fehlziele=" + guardFailedTargets.size());
                         guardNoTargetLogged = true;
                     }
                     if (!hasMinedSpawner) {
@@ -2297,21 +2269,22 @@ public class Krypton implements ModInitializer {
                             guardFailedRetryTicks = 0;
                         }
                     } else {
-                        // Sichtbare, aber unerreichbare Ziele im Schutzradius
-                        // sind NICHT gesichert. Die Reichweitensuche allein darf
-                        // keinen Logout ausloesen, wenn andere Spawner bleiben.
-                        boolean nearbySpawner = hasNearbySpawner(client);
-                        boolean areaSpawner = hasVisibleSpawnerInGuardArea(client);
-                        if (!guardFailedTargets.isEmpty() || nearbySpawner || areaSpawner) {
-                            if (safetyLogoutTimer >= 0)
-                                guardAudit("Leerpruefung abgebrochen: Rest-Spawner erkannt (nah="
-                                        + nearbySpawner + ", Schutzradius=" + areaSpawner
-                                        + ", Fehlziele=" + guardFailedTargets.size() + ")");
+                        // Nur abbaubare Spawner zaehlen fuer den Abschluss. Die
+                        // 40 Bloecke sind der Gegner-Trigger, nicht die Reichweite
+                        // der Spitzhacke. Ein entfernter oder verdeckter Spawner
+                        // darf den Notfall-Logout nicht dauerhaft blockieren.
+                        // Fehlziele aber erst nach 60 Ticks neu versuchen, damit
+                        // ein bloss kurz verfehltes Ziel nicht verloren geht.
+                        if (!guardFailedTargets.isEmpty()) {
+                            guardFailedTargets.removeIf(pos -> !client.world.getBlockState(pos).isOf(Blocks.SPAWNER));
+                        }
+                        if (!guardFailedTargets.isEmpty()) {
                             safetyLogoutTimer = -1;
                             guardNoReachableSpawner = true;
                             if (++guardFailedRetryTicks >= 60) {
                                 guardFailedTargets.clear();
                                 guardFailedRetryTicks = 0;
+                                guardAudit("Fehlziele freigegeben; erneute Reichweitenpruefung");
                             }
                         } else {
                             guardFailedRetryTicks = 0;
@@ -2328,7 +2301,7 @@ public class Krypton implements ModInitializer {
                         }
 
                         if (safetyLogoutTimer == 0) {
-                            guardAudit("Notfall-Logout: Leerpruefung abgeschlossen, Abbaue=" + guardCompletedBreaks);
+                            guardAudit("Notfall-Logout: kein erreichbarer Spawner nach Karenz, Abbaue=" + guardCompletedBreaks);
                             if (isMining) {
                                 setAttackPressed(client,false);
                                 isMining = false;
@@ -2359,7 +2332,7 @@ public class Krypton implements ModInitializer {
                             guardFailedRetryTicks = 0;
 
                             if (client.getNetworkHandler() != null) {
-                                client.getNetworkHandler().getConnection().disconnect(Text.literal("§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout."));
+                                client.getNetworkHandler().getConnection().disconnect(Text.literal("§aAlle erreichbaren Spawner abgebaut! §4Notfall-Logout."));
                             }
                         }
                     }
