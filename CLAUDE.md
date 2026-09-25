@@ -318,10 +318,15 @@ mindestens ein Blockbruch wurde clientseitig abgeschlossen (nicht bloß ein Ziel
 ausgewählt). Ohne einen solchen Abschluss wird
 **nicht** fälschlich „alle gesichert“ gemeldet; der Guard bleibt im Einsatz
 und zeigt „KEIN SPAWNER IN REICHWEITE“. Nach einem abgeschlossenen Abbau wird erst ausgeloggt,
-wenn kein erreichbarer oder sichtbarer Spawner im 9×9×9-Suchbereich mehr da ist,
+wenn kein erreichbarer oder sichtbarer Spawner im 9×9×9-Suchbereich und kein
+bekannter geladener Spawner im 40-Block-Schutzradius mehr da ist,
 kein fehlgeschlagenes Ziel aussteht und die Karenz abgelaufen ist. Fehlgeschlagene
 Ziele werden alle 60 Ticks erneut geprüft. Staff gewinnt weiterhin immer;
 manuelles Abschalten und Weltverlust setzen den festgehaltenen Einsatz zurück.
+Während eines laufenden Abbaus bleibt das letzte Ziel erhalten, wenn die
+Neusuche vorübergehend nichts liefert, der Zielblock aber noch ein Spawner ist
+und der echte Blickstrahl ihn weiterhin trifft. Der Gegnerstatus ist dafür
+unerheblich.
 
 **Spawner-Suche:** `findReachableSpawner()` — 9×9×9 Würfel um den Spieler,
 `Blocks.SPAWNER`. Pro Kandidat **derselbe Check wie beim Abbau**: Raycast vom
@@ -333,6 +338,10 @@ Guard andere Ziele zuerst bearbeiten kann. Fehlgeschlagene Ziele werden nach
 Gibt es keinen erreichbaren Spawner, zeigt das HUD
 `Guard: §cKEIN SPAWNER IN REICHWEITE` (§6.1) — der Spieler muss dann **innerhalb**
 **von 4,5 Blöcken mit freier Sicht** stehen, sonst kann der Guard nichts tun.
+Beim Abschluss prüft der Guard zusätzlich die bereits gescannten Block-Entities
+im 40-Block-Schutzradius. Ein dort sichtbarer, aber von der AFK-Position aus
+unerreichbarer Spawner verhindert „alle gesichert“: der Guard bleibt online und
+meldet die fehlende Reichweite, kann aber ohne Bewegung nicht dorthin abbauen.
 
 **State-Machine `autoSpawnerState`:**
 
@@ -564,13 +573,20 @@ Die Sperre ist rein clientseitig, der Server merkt davon nichts. Im HUD steht
 #### 5.4.4 Safety-Logout
 
 Wenn `hasMinedSpawner == true` und weder ein erreichbarer noch ein sichtbarer
-Spawner im Suchbereich oder ein fehlgeschlagenes Ziel verbleibt,
+Spawner im Suchbereich, ein bekannter geladener Spawner im 40-Block-Radius
+oder ein fehlgeschlagenes Ziel verbleibt,
 startet nach der 60-Tick-Karenz seit dem letzten clientseitigen Blockbruch `safetyLogoutTimer`
 (8–24 Ticks). Das Verschwinden des auslösenden Spielers startet diesen Timer
 für sich allein **nicht**. Bei 0: Attack los, `cancelBlockBreaking()`,
 Guard aus, **`setSafetyLogout(true)`**, dann
 `networkHandler.getConnection().disconnect(...)` mit der Nachricht
 `§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout.`
+
+Zur Diagnose schreibt die neue Guard-Version `guard-presence-2026-09-25` in
+`logs/latest.log` einmalige Ereignisse für Gegner erkannt/weg, fehlendes bzw.
+wieder gefundenes Ziel, abgeschlossene Abbau-Vorgänge und den tatsächlichen
+Notfall-Logout. Damit lässt sich ein echter Abbruch des Abbaus von einem
+vorübergehend unsichtbaren oder unerreichbaren Ziel unterscheiden.
 
 `setSafetyLogout(true)` schreibt `krypton_safelogout.txt`. Damit ist jeder
 **automatische** Rejoin gesperrt — Auto Reconnect *und* Session-Fix, und zwar
@@ -1455,6 +1471,9 @@ dürfen keinen alten Einsatz beim nächsten Einschalten wieder aufnehmen.
 Wenn ein sichtbarer Spawner unerreichbar ist, muss der Guard online bleiben und
 „KEIN SPAWNER IN REICHWEITE“ anzeigen; nach Wiederherstellung der Sichtlinie
 muss er erneut abbauen.
+Auf dem tatsächlich getesteten PC danach `logs/latest.log` auf Zeilen mit
+`[Krypton guard-presence-2026-09-25]` prüfen. Nur so ist nachweisbar, dass
+dieser Build geladen war und an welchem Ereignis der Einsatz endete.
 
 ### 13.5 Staff-Erkennung (Stern-Ranks)
 1. ClickGUI → MISC → **STAFF SCAN** öffnen, während Staff und normale Spieler
