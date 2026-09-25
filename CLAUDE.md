@@ -129,7 +129,7 @@ Reihenfolge beim Client-Start:
 5. **Welt == null** → Reset von `isFreecamActive`, `hasMinedSpawner`,
    `isMining`, `autoSpawnerState`, `actionDelayTimer`, `sessionSeenPlayers`,
    `spawnerScriptActive/State/CurrentTarget`, `guardEngaged`, `sneakSuppressTicks`,
-   `guardAimFailTicks`, `guardSneakWaitTicks`, Abbau-Pause und Logout-Timer;
+   `guardAimFailTicks`, `guardSneakWaitTicks`, Abbau-Pause und `guardNoTargetTicks`;
    dann `return`.
 5b. **Guard-Watchdog** — `ensureGuardReady(client)`, danach `guardExitFreecamOnEnemy(client)` und `updateGuardReadiness(client)`. Läuft vor allem anderen
    In-Welt-Code und stellt sicher, dass der Spawner-Schutz jederzeit abbaufähig
@@ -313,17 +313,19 @@ vom Server geöffnete GUIs werden geschlossen.
 **Auslöser verlässt den Server:** Bereits die erste Sichtung setzt
 `guardThreatLatched`, unabhängig davon, ob schon ein Ziel gefunden oder ein
 Block zerbrochen wurde. Zielsuche und State-Machine laufen danach weiter,
-selbst wenn der Gegner sofort ausloggt. `hasMinedSpawner` bedeutet separat:
-mindestens ein Blockbruch wurde clientseitig abgeschlossen (nicht bloß ein Ziel
-ausgewählt). Ohne einen solchen Abschluss wird
-**nicht** fälschlich „alle gesichert“ gemeldet; der Guard bleibt im Einsatz
-und zeigt „KEIN SPAWNER IN REICHWEITE“. Nach einem abgeschlossenen Abbau wird erst ausgeloggt,
-wenn kein Spawner mehr vom AFK-Standort erreichbar ist, zuvor fehlgeschlagene
-Ziele erneut versucht wurden und die Karenz abgelaufen ist. Die 40 Blöcke
+selbst wenn der Gegner sofort ausloggt. `hasMinedSpawner` und
+`guardCompletedBreaks` dokumentieren clientseitig erkannte Blockbrüche, sind
+aber **keine Logout-Voraussetzung**: deren Erkennung kann trotz sichtbarem
+Abbau ausbleiben. Ist während des festgehaltenen Einsatzes 100 Client-Ticks
+(ungefähr 5 s) lang kein Spawner vom AFK-Standort erreichbar, folgt nach
+einer letzten Zielsuche der Notfall-Logout. Bei Tick 40 werden vorübergehend
+übersprungene Fehlziele freigegeben und erneut geprüft. Jedes wieder
+erreichbare Ziel setzt den Zähler auf 0 zurück. Die 40 Blöcke
 gelten nur für die Gegnererkennung: entfernte oder verdeckte Spawner können
 von dort nicht abgebaut werden und blockieren den Logout nicht. Die Meldung
-behauptet daher nur, dass alle **erreichbaren** Spawner abgebaut wurden.
-Fehlgeschlagene Ziele werden nach 60 Ticks erneut geprüft. Staff gewinnt weiterhin immer;
+behauptet nur dann, dass alle **erreichbaren** Spawner abgebaut wurden, wenn
+mindestens ein Bruch clientseitig bestätigt wurde. Sonst lautet sie
+„Kein Spawner in Reichweite! Notfall-Logout.“ Staff gewinnt weiterhin immer;
 manuelles Abschalten und Weltverlust setzen den festgehaltenen Einsatz zurück.
 Während eines laufenden Abbaus bleibt das letzte Ziel erhalten, wenn die
 Neusuche vorübergehend nichts liefert, der Zielblock aber noch ein Spawner ist
@@ -335,8 +337,8 @@ unerheblich.
 Auge Richtung Blockmitte, Länge = `getBlockInteractionRange()`, der **erste**
 getroffene Block muss der Spawner sein. Davon der nächstgelegene. Ziele aus
 `guardFailedTargets` (3 s nicht getroffen) werden übersprungen, damit der
-Guard andere Ziele zuerst bearbeiten kann. Fehlgeschlagene Ziele werden nach
-60 Ticks erneut versucht und blockieren bis dahin den Safety-Logout.
+Guard andere Ziele zuerst bearbeiten kann. Sind keine anderen Ziele erreichbar,
+werden die Fehlziele nach 40 Ticks ohne Ziel erneut versucht.
 Gibt es keinen erreichbaren Spawner, zeigt das HUD
 `Guard: §cKEIN SPAWNER IN REICHWEITE` (§6.1) — der Spieler muss dann **innerhalb**
 **von 4,5 Blöcken mit freier Sicht** stehen, sonst kann der Guard nichts tun.
@@ -468,20 +470,20 @@ Position liegt; der Zielwechsel darf State 5 nicht vorzeitig verlassen.
 > Folge, dass der Spawner nie fertig wird. Deshalb hängt die Pause strikt am
 > erkannten Blockbruch und nicht an einem festen Intervall.
 
-**Safety-Logout-Karenz (`guardSinceBreakTicks`).** Direkt nach einem Bruch ist
+**Safety-Logout-Karenz (`guardNoTargetTicks`).** Direkt nach einem Bruch ist
 die Position für ein paar Ticks leer, bis der Server das nächste Exemplar des
 Stacks schickt. `findReachableSpawner()` findet in dieser Lücke nichts — ohne
 Gegenmaßnahme würde der Guard "keine Spawner mehr" schließen und **mitten im**
-**Stack ausloggen**, obwohl noch Dutzende dastehen. Deshalb startet der
-Safety-Logout-Timer erst, wenn der letzte Blockbruch **mehr als 60 Ticks (3 s)**
-her ist. Wegen Raycast-Fehlern übersprungene Ziele werden vor dem Logout erneut
-freigegeben und geprüft; ein danach unerreichbarer Spawner blockiert nicht ewig.
+**Stack ausloggen**, obwohl noch Dutzende dastehen. Deshalb muss die Zielsuche
+**100 Ticks am Stück** leer bleiben. Bei Tick 40 werden Fehlziele freigegeben;
+vor dem Logout wird ohne Fehlziel-Filter ein letztes Mal gesucht. Ein neues
+erreichbares Ziel setzt den Zähler zurück.
 
 
 **Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),
 zählt `guardAimFailTicks`. Nach 5 Ticks geht es zurück in State 2 (neu
 anvisieren), nach 60 Ticks wird das Ziel vorübergehend übersprungen
-(`autoSpawnerState = 0`) und nach 60 Ticks erneut versucht. Nur ein wieder
+(`autoSpawnerState = 0`) und nach 40 ziel-losen Ticks erneut versucht. Nur ein wieder
 erreichbares Ziel setzt den Abbau fort; ein dauerhaft unerreichbares nicht.
 
 **Der Watchdog** `ensureGuardReady()` läuft jeden Tick, solange
@@ -572,16 +574,17 @@ Die Sperre ist rein clientseitig, der Server merkt davon nichts. Im HUD steht
 
 #### 5.4.4 Safety-Logout
 
-Wenn `hasMinedSpawner == true`, kein erreichbarer Spawner im Suchbereich
-verbleibt und fehlgeschlagene Ziele nach 60 Ticks erneut geprüft wurden,
-startet nach der 60-Tick-Karenz seit dem letzten clientseitigen Blockbruch `safetyLogoutTimer`
-(8–24 Ticks). Das Verschwinden des auslösenden Spielers startet diesen Timer
-für sich allein **nicht**. Bei 0: Attack los, `cancelBlockBreaking()`,
+Wenn `guardThreatLatched == true` und 100 Ticks am Stück kein erreichbarer
+Spawner gefunden wird, erfolgt nach der letzten Zielsuche der Logout – auch
+wenn `hasMinedSpawner == false`. Bei Tick 40 werden Fehlziele erneut geprüft;
+der Gegner-Logout selbst startet keinen Countdown. Danach: Attack los,
+`cancelBlockBreaking()`,
 Guard aus, **`setSafetyLogout(true)`**, dann
 `networkHandler.getConnection().disconnect(...)` mit der Nachricht
-`§aAlle erreichbaren Spawner abgebaut! §4Notfall-Logout.`
+`§aAlle erreichbaren Spawner abgebaut! §4Notfall-Logout.` (bei bestätigtem
+Abbau), sonst `§eKein Spawner in Reichweite! §4Notfall-Logout.`
 
-Zur Diagnose schreibt die neue Guard-Version `guard-clearance-2026-09-25` in
+Zur Diagnose schreibt die neue Guard-Version `guard-logout-2026-09-25` in
 `logs/latest.log` einmalige Ereignisse für Gegner erkannt/weg, fehlendes bzw.
 wieder gefundenes Ziel, abgeschlossene Abbau-Vorgänge und den tatsächlichen
 Notfall-Logout. Damit lässt sich ein echter Abbruch des Abbaus von einem
@@ -995,7 +998,7 @@ aktiv ist. Angezeigte Einträge:
 ```
 Finder: §4<n>                       Player ESP: §bON      Tracers: §bON
 Freecam: §aON                       Fullbright: §eON
-Guard: §aBEREIT §8[Menüs gesperrt]   ← §aBEREIT §e(ohne Silk Touch) | §cNICHT BEREIT – <Grund> | §4EINSATZ | §cKEIN SPAWNER IN REICHWEITE
+Guard: §aBEREIT §8[Menüs gesperrt]   ← §aBEREIT §e(ohne Silk Touch) | §cNICHT BEREIT – <Grund> | §4EINSATZ | §cKEIN SPAWNER IN REICHWEITE [Logout n/100]
 Spawner ESP: §dON     Reconnect: §aON
 Session Fix: §aON
 §4Rejoin gesperrt (Notfall-Logout)   ← nur wenn wasSafetyLogout gesetzt ist
@@ -1462,8 +1465,10 @@ Wer einen eigenen Testserver hat, kann Kick-Texte auch gezielt durchspielen:
 bereitstellen, den zweiten Account den Guard auslösen lassen und ihn sofort
 ausloggen (auch vor der ersten Zielwahl und vor dem ersten Blockbruch testen).
 Der Guard muss alle noch erreichbaren Spawner weiter abbauen. Während noch einer da ist, darf weder
-„Alle Spawner gesichert“ erscheinen noch der Client disconnecten. Erst nach
-dem letzten Spawner und der Karenz darf der Notfall-Logout erfolgen. Beim
+„Alle Spawner gesichert“ erscheinen noch der Client disconnecten. Nach
+100 Ticks ohne erreichbares Ziel muss der Notfall-Logout erfolgen, selbst wenn
+kein Blockbruch clientseitig bestätigt wurde. Das HUD zeigt dabei
+`[Logout n/100]`; erreicht der Zähler 40, werden Fehlziele neu geprüft. Beim
 erneuten Versuch Staff während des Abbaus erscheinen lassen: Der Staff-Stopp
 muss den Einsatz weiterhin sofort beenden. Auch Guard aus und Welt verlassen
 dürfen keinen alten Einsatz beim nächsten Einschalten wieder aufnehmen.
@@ -1472,7 +1477,7 @@ Guard nach der Karenz ebenfalls ausloggen; er darf diese nicht als abgebaut
 ausgeben. Wird ein zuvor fehlgeschlagenes Ziel wieder erreichbar, muss er es
 vor dem Logout erneut abbauen.
 Auf dem tatsächlich getesteten PC danach `logs/latest.log` auf Zeilen mit
-`[Krypton guard-clearance-2026-09-25]` prüfen. Nur so ist nachweisbar, dass
+`[Krypton guard-logout-2026-09-25]` prüfen. Nur so ist nachweisbar, dass
 dieser Build geladen war und an welchem Ereignis der Einsatz endete.
 
 ### 13.5 Staff-Erkennung (Stern-Ranks)

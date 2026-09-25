@@ -52,7 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class Krypton implements ModInitializer {
 
     // Im Log des AFK-PCs eindeutig erkennbar, auch wenn die Mod-Version gleich bleibt.
-    private static final String GUARD_BUILD = "guard-clearance-2026-09-25";
+    private static final String GUARD_BUILD = "guard-logout-2026-09-25";
 
     private static void guardAudit(String event) {
         System.out.println("[Krypton " + GUARD_BUILD + "] " + event);
@@ -253,13 +253,16 @@ public class Krypton implements ModInitializer {
 
     // --- AUTO SPAWNER ---
     private static boolean isMining = false;
-    // Mindestens ein Abbau wurde clientseitig bis zum Abschluss ausgefuehrt.
-    // Die bloße Zielwahl ist noch kein Erfolg und erlaubt keinen Logout.
+    // Nur Diagnose/Text der Logout-Meldung. Darf den Logout nicht blockieren:
+    // NoRisk/Server-Plugins koennen den Bruch bestaetigen, ohne dass die
+    // isBreakingBlock()-Flanke in jedem Fall clientseitig beobachtet wird.
     public static boolean hasMinedSpawner = false;
     // Bereits die Sichtung eines Gegners startet den Einsatz dauerhaft. Ein
     // Logout vor der ersten Zielwahl darf den Guard nicht wieder entschärfen.
     private static boolean guardThreatLatched = false;
-    private static int safetyLogoutTimer = -1;
+    private static final int GUARD_NO_TARGET_RETRY_TICKS = 40;
+    private static final int GUARD_NO_TARGET_LOGOUT_TICKS = 100;
+    private static int guardNoTargetTicks = 0;
     private static int guardCompletedBreaks = 0;
     private static boolean guardEnemySeenLastTick = false;
     private static boolean guardNoTargetLogged = false;
@@ -305,12 +308,6 @@ public class Krypton implements ModInitializer {
     // zur Folge, dass der Spawner nie fertig wird.
     private static int guardReleaseTicks = 0;
     private static boolean guardWasBreaking = false;
-    // Ticks seit der ersten Zielwahl oder dem letzten erfolgreichen Blockbruch.
-    // Schuetzt den Safety-Logout: bei gestackten Spawnern ist die Position fuer
-    // ein paar Ticks leer, bis der Server das naechste Exemplar schickt. Ohne
-    // Karenzzeit wuerde der Guard genau in dieser Luecke "keine Spawner mehr"
-    // sehen und mitten im Stack ausloggen, obwohl noch Dutzende da sind.
-    private static int guardSinceBreakTicks = 9999;
     // Gegner in Reichweite, aber KEIN Spawner, den der Guard von hier aus
     // treffen kann (alle >4,5 Blöcke entfernt oder verdeckt). Der Guard kann
     // dann nichts tun – das muss im HUD sofort auffallen, sonst wiegt man sich
@@ -336,7 +333,6 @@ public class Krypton implements ModInitializer {
     // Zielwahl übersprungen, sonst wählt findReachableSpawner() sofort wieder
     // dasselbe unerreichbare Ziel und der Guard dreht sich im Kreis.
     private static final Set<BlockPos> guardFailedTargets = new HashSet<>();
-    private static int guardFailedRetryTicks = 0;
     private static int guardSneakWaitTicks = 0;
 
     // --- DISCORD SPAWNER SCRIPT ---
@@ -1655,7 +1651,7 @@ public class Krypton implements ModInitializer {
                 guardCompletedBreaks = 0;
                 guardEnemySeenLastTick = false;
                 guardNoTargetLogged = false;
-                safetyLogoutTimer = -1;
+                guardNoTargetTicks = 0;
                 lastTargetSpawner = null;
                 autoSpawnerState = 0;
                 actionDelayTimer = 0;
@@ -1669,9 +1665,7 @@ public class Krypton implements ModInitializer {
                 guardSneakWaitTicks = 0;
                 guardReleaseTicks = 0;
                 guardWasBreaking = false;
-                guardSinceBreakTicks = 9999;
                 guardFailedTargets.clear();
-                guardFailedRetryTicks = 0;
                 guardNoReachableSpawner = false;
                 return;
             }
@@ -1919,15 +1913,13 @@ public class Krypton implements ModInitializer {
                     autoSpawnerState = 0;
                     actionDelayTimer = 0;
                     lastTargetSpawner = null;
-                    safetyLogoutTimer = -1;
+                    guardNoTargetTicks = 0;
                     guardEngaged = false;
                     guardAimFailTicks = 0;
                     guardSneakWaitTicks = 0;
                     guardReleaseTicks = 0;
                     guardWasBreaking = false;
-                    guardSinceBreakTicks = 9999;
                     guardFailedTargets.clear();
-                    guardFailedRetryTicks = 0;
                 } else if (enemyNear != null) {
                     // Normaler Spieler → abbauen + ausloggen.
                     //
@@ -1968,10 +1960,9 @@ public class Krypton implements ModInitializer {
 
                 // Im Notfall hat der Abbau Vorrang vor Server-GUIs.
                 guardEngaged = guardContinuing;
-                // Gegner da, aber nichts Abbaubares in Sicht und noch nichts
-                // abgebaut → der Guard ist wirkungslos. Sichtbar machen (HUD).
-                guardNoReachableSpawner = guardContinuing && spawnerPos == null && !hasMinedSpawner;
-                if (guardSinceBreakTicks < 9999) guardSinceBreakTicks++;
+                // Kein erreichbares Ziel muss sichtbar sein. Der Logout haengt
+                // nicht mehr am nur clientseitig beobachteten Blockbruch.
+                guardNoReachableSpawner = guardContinuing && spawnerPos == null;
 
                 // Waehrend der Pause zwischen zwei Bloecken NICHT zuruecksetzen:
                 // dort ist die Position fuer ein paar Ticks leer, bis der Server das
@@ -1983,7 +1974,6 @@ public class Krypton implements ModInitializer {
                     if (!client.world.getBlockState(lastTargetSpawner).isOf(Blocks.SPAWNER)) {
                         setAttackPressed(client,false);
                         isMining = false;
-                        guardSinceBreakTicks = 0; // moeglicher Bruch / verzögertes Server-Update
                         guardAimFailTicks = 0;
                         autoSpawnerState = 0;
                         actionDelayTimer = 4 + (int)(Math.random() * 6);
@@ -1995,9 +1985,8 @@ public class Krypton implements ModInitializer {
                 if (guardContinuing && spawnerPos != null) {
                     if (guardNoTargetLogged) guardAudit("Spawner wieder erreichbar; Abbau wird fortgesetzt");
                     guardNoTargetLogged = false;
-                    if (safetyLogoutTimer >= 0) guardAudit("Leerpruefung abgebrochen: Spawner wieder erreichbar");
-                    safetyLogoutTimer = -1;
-                    guardFailedRetryTicks = 0;
+                    if (guardNoTargetTicks > 0) guardAudit("Leerpruefung abgebrochen: Spawner wieder erreichbar");
+                    guardNoTargetTicks = 0;
 
                     // Nach einem Bruch erst die volle Loslass-Pause beenden,
                     // auch wenn der naechste Spawner an einer ANDEREN Position
@@ -2211,7 +2200,6 @@ public class Krypton implements ModInitializer {
                                     guardCompletedBreaks++;
                                     if (guardCompletedBreaks == 1 || guardCompletedBreaks % 16 == 0)
                                         guardAudit("Abbau abgeschlossen, Anzahl=" + guardCompletedBreaks);
-                                    guardSinceBreakTicks = 0;
                                     // Lange Pause: 14-22 Ticks (700-1100 ms) plus Vanillas
                                     // 5 Ticks blockBreakingCooldown = rund eine Sekunde.
                                     guardReleaseTicks = 14 + (int)(Math.random() * 9);
@@ -2256,66 +2244,49 @@ public class Krypton implements ModInitializer {
                     if (!guardNoTargetLogged) {
                         guardAudit("Kein erreichbares Abbauziel; Gegner noch da="
                                 + guardEnemySeenLastTick + ", Abbaue=" + guardCompletedBreaks
+                                + ", BruchFlag=" + hasMinedSpawner
                                 + ", Fehlziele=" + guardFailedTargets.size());
                         guardNoTargetLogged = true;
                     }
-                    if (!hasMinedSpawner) {
-                        // Noch kein vollendeter Abbau: kein "alle gesichert",
-                        // selbst wenn das erste Ziel gerade verschwunden ist.
-                        safetyLogoutTimer = -1;
-                        guardNoReachableSpawner = true;
-                        if (!guardFailedTargets.isEmpty() && ++guardFailedRetryTicks >= 60) {
+                    // Entscheidend ist ausschliesslich: Seit wie vielen Ticks
+                    // gibt es kein von hier aus erreichbares Ziel? Das fruehere
+                    // hasMinedSpawner-Gate konnte trotz abgebauter Spawner false
+                    // bleiben und hielt den Logout dann fuer immer auf.
+                    if (guardNoTargetTicks < GUARD_NO_TARGET_LOGOUT_TICKS) guardNoTargetTicks++;
+                    if (guardNoTargetTicks == GUARD_NO_TARGET_RETRY_TICKS) {
+                        if (!guardFailedTargets.isEmpty()) {
                             guardFailedTargets.clear();
-                            guardFailedRetryTicks = 0;
+                            guardAudit("Fehlziele freigegeben; erneute Reichweitenpruefung");
                         }
-                    } else {
-                        // Nur abbaubare Spawner zaehlen fuer den Abschluss. Die
-                        // 40 Bloecke sind der Gegner-Trigger, nicht die Reichweite
-                        // der Spitzhacke. Ein entfernter oder verdeckter Spawner
-                        // darf den Notfall-Logout nicht dauerhaft blockieren.
-                        // Fehlziele aber erst nach 60 Ticks neu versuchen, damit
-                        // ein bloss kurz verfehltes Ziel nicht verloren geht.
-                        if (!guardFailedTargets.isEmpty()) {
-                            guardFailedTargets.removeIf(pos -> !client.world.getBlockState(pos).isOf(Blocks.SPAWNER));
-                        }
-                        if (!guardFailedTargets.isEmpty()) {
-                            safetyLogoutTimer = -1;
-                            guardNoReachableSpawner = true;
-                            if (++guardFailedRetryTicks >= 60) {
-                                guardFailedTargets.clear();
-                                guardFailedRetryTicks = 0;
-                                guardAudit("Fehlziele freigegeben; erneute Reichweitenpruefung");
-                            }
+                    }
+                    if (guardNoTargetTicks >= GUARD_NO_TARGET_LOGOUT_TICKS) {
+                        // Letzte Suche ohne Fehlziel-Filter. Taucht ein weiterer
+                        // Stack-Spawner auf, wird der Abbau im naechsten Tick
+                        // fortgesetzt statt mitten im Stack auszuloggen.
+                        guardFailedTargets.clear();
+                        if (findReachableSpawner(client) != null) {
+                            guardNoTargetTicks = 0;
+                            guardNoTargetLogged = false;
+                            guardAudit("Abschluss abgebrochen: Spawner wieder erreichbar");
+                        } else if (client.getNetworkHandler() == null) {
+                            guardNoTargetTicks = 0;
+                            guardAudit("Logout verschoben: Netzwerkhandler fehlt");
                         } else {
-                            guardFailedRetryTicks = 0;
-                            // Bei gestackten Spawnern kann das naechste Exemplar
-                            // kurz nach dem Bruch erst vom Server eintreffen.
-                            if (guardSinceBreakTicks < 60) {
-                                safetyLogoutTimer = -1;
-                            } else if (safetyLogoutTimer == -1) {
-                                safetyLogoutTimer = 8 + (int)(Math.random() * 17);
-                                guardAudit("Kein Ziel gefunden; Logout-Pruefung gestartet, Abbaue="
-                                        + guardCompletedBreaks);
-                            }
-                            if (safetyLogoutTimer > 0) safetyLogoutTimer--;
-                        }
-
-                        if (safetyLogoutTimer == 0) {
-                            guardAudit("Notfall-Logout: kein erreichbarer Spawner nach Karenz, Abbaue=" + guardCompletedBreaks);
-                            if (isMining) {
-                                setAttackPressed(client,false);
-                                isMining = false;
-                            }
+                            String reason = guardCompletedBreaks > 0
+                                    ? "§aAlle erreichbaren Spawner abgebaut! §4Notfall-Logout."
+                                    : "§eKein Spawner in Reichweite! §4Notfall-Logout.";
+                            guardAudit("Notfall-Logout nach 100 Ticks ohne Ziel; Abbaue=" + guardCompletedBreaks);
+                            setAttackPressed(client, false);
                             if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
+                            isMining = false;
                             autoSpawnerState = 0;
                             actionDelayTimer = 0;
                             isAutoSpawnerActive = false;
-                            // PERSISTENT setzen: ab jetzt ist jeder automatische Rejoin
-                            // gesperrt – auch nach einem Client-Neustart. Erst eine
-                            // manuelle Verbindung (60 Ticks stabil) hebt die Sperre auf.
+                            saveCheatStates();
+                            // PERSISTENT: kein Auto-Rejoin nach dem Notfall.
                             setSafetyLogout(true);
                             ticksConnected = 0;
-                            safetyLogoutTimer = -1;
+                            guardNoTargetTicks = 0;
                             lastTargetSpawner = null;
                             hasMinedSpawner = false;
                             guardThreatLatched = false;
@@ -2323,28 +2294,23 @@ public class Krypton implements ModInitializer {
                             guardEnemySeenLastTick = false;
                             guardNoTargetLogged = false;
                             guardEngaged = false;
+                            guardNoReachableSpawner = false;
                             guardAimFailTicks = 0;
                             guardSneakWaitTicks = 0;
                             guardReleaseTicks = 0;
                             guardWasBreaking = false;
-                            guardSinceBreakTicks = 9999;
                             guardFailedTargets.clear();
-                            guardFailedRetryTicks = 0;
-
-                            if (client.getNetworkHandler() != null) {
-                                client.getNetworkHandler().getConnection().disconnect(Text.literal("§aAlle erreichbaren Spawner abgebaut! §4Notfall-Logout."));
-                            }
+                            client.getNetworkHandler().getConnection().disconnect(Text.literal(reason));
                         }
                     }
                 } else {
-                    safetyLogoutTimer = -1;
+                    guardNoTargetTicks = 0;
                     autoSpawnerState = 0;
                     actionDelayTimer = 0;
                     lastTargetSpawner = null;
                     guardAimFailTicks = 0;
                     guardSneakWaitTicks = 0;
                     guardFailedTargets.clear();
-                    guardFailedRetryTicks = 0;
                     if (isMining) {
                         setAttackPressed(client,false);
                         if (client.interactionManager != null) client.interactionManager.cancelBlockBreaking();
@@ -2359,7 +2325,7 @@ public class Krypton implements ModInitializer {
                 guardCompletedBreaks = 0;
                 guardEnemySeenLastTick = false;
                 guardNoTargetLogged = false;
-                safetyLogoutTimer = -1;
+                guardNoTargetTicks = 0;
                 autoSpawnerState = 0;
                 actionDelayTimer = 0;
                 lastTargetSpawner = null;
@@ -2368,9 +2334,7 @@ public class Krypton implements ModInitializer {
                 guardSneakWaitTicks = 0;
                 guardReleaseTicks = 0;
                 guardWasBreaking = false;
-                guardSinceBreakTicks = 9999;
                 guardFailedTargets.clear();
-                guardFailedRetryTicks = 0;
                 guardNoReachableSpawner = false;
                 if (isMining) {
                     setAttackPressed(client,false);
@@ -2411,7 +2375,7 @@ public class Krypton implements ModInitializer {
             // sich, warum ESC nichts tut.
             if (isAutoSpawnerActive) {
                 String guardState;
-                if (guardNoReachableSpawner)          guardState = "§cKEIN SPAWNER IN REICHWEITE";   // Gegner da, nichts abbaubar
+                if (guardNoReachableSpawner)          guardState = "§cKEIN SPAWNER IN REICHWEITE §7[Logout " + guardNoTargetTicks + "/" + GUARD_NO_TARGET_LOGOUT_TICKS + "]";
                 else if (guardEngaged)                guardState = "§4EINSATZ";
                 else if (!guardReadyReason.isEmpty()) guardState = "§cNICHT BEREIT §7– " + guardReadyReason;
                 else if (!guardReadyWarn.isEmpty())   guardState = "§aBEREIT §e(" + guardReadyWarn + ")";
