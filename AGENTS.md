@@ -127,9 +127,10 @@ Reihenfolge beim Client-Start:
    gekommen sein.
 4. **Auto-Reconnect / Session-Fix** — siehe §5.7 und §5.11.
 5. **Welt == null** → Reset von `isFreecamActive`, `hasMinedSpawner`,
-   `autoSpawnerState`, `actionDelayTimer`, `sessionSeenPlayers`,
+   `isMining`, `autoSpawnerState`, `actionDelayTimer`, `sessionSeenPlayers`,
    `spawnerScriptActive/State/CurrentTarget`, `guardEngaged`, `sneakSuppressTicks`,
-   `guardAimFailTicks`, `guardSneakWaitTicks`; dann `return`.
+   `guardAimFailTicks`, `guardSneakWaitTicks`, Abbau-Pause und Logout-Timer;
+   dann `return`.
 5b. **Guard-Watchdog** — `ensureGuardReady(client)`, danach `guardExitFreecamOnEnemy(client)` und `updateGuardReadiness(client)`. Läuft vor allem anderen
    In-Welt-Code und stellt sicher, dass der Spawner-Schutz jederzeit abbaufähig
    ist (siehe §5.4.1).
@@ -272,8 +273,8 @@ Silk Touch)` oder `§cNICHT BEREIT – <Grund>`. Man sieht also **vorher**, ob d
 funktionieren würde, statt es erst zu merken, wenn der Gegner da ist.
 
 **Notfall vor Freecam (`guardExitFreecamOnEnemy()`):** In der Freecam kann der Guard nicht
-arbeiten (Körper eingefroren). Bisher war er dort schlicht aus. Jetzt: Fremder in 40 Blöcken
-→ Freecam wird beendet, der Guard-Block läuft im selben Tick.
+arbeiten (Körper eingefroren). Bei einem Fremden in 40 Blöcken **oder einem bereits
+begonnenen Einsatz** wird die Freecam beendet; der Guard-Block läuft im selben Tick.
 
 **Spitzhacke muss in der HOTBAR liegen.** Der Guard kann nur per
 `setSelectedSlot()` wählen. Früher holte er eine fehlende Spitzhacke per
@@ -308,6 +309,16 @@ Guard bleibt aus, bis er von Hand wieder eingeschaltet wird; solange steht
 **`guardEngaged`** (`enemyFound || hasMinedSpawner`) markiert den Notfall-Modus.
 Solange er läuft, hat der Abbau absoluten Vorrang:
 vom Server geöffnete GUIs werden geschlossen.
+
+**Auslöser verlässt den Server:** `hasMinedSpawner` wird bereits beim ersten
+erreichbaren Ziel gesetzt und hält den Einsatz ab dann fest – auch wenn noch
+kein Block vollständig zerbrochen ist. Zielsuche und State-Machine laufen mit
+`enemyFound || hasMinedSpawner` weiter. Ein schnelles Ausloggen des fremden
+Spielers darf den Abbau also nicht in den Safety-Logout umleiten. Erst wenn
+kein weiterer erreichbarer Spawner gefunden wird **und** die Karenz nach dem
+ersten Ziel bzw. letzten Bruch abgelaufen ist, folgt der bisherige Notfall-Logout. Erscheint
+Staff, gewinnt weiterhin der Staff-Stopp; manuelles Abschalten und Weltverlust
+setzen den festgehaltenen Einsatz zurück.
 
 **Spawner-Suche:** `findReachableSpawner()` — 9×9×9 Würfel um den Spieler,
 `Blocks.SPAWNER`. Pro Kandidat **derselbe Check wie beim Abbau**: Raycast vom
@@ -543,8 +554,10 @@ Die Sperre ist rein clientseitig, der Server merkt davon nichts. Im HUD steht
 
 #### 5.4.4 Safety-Logout
 
-Wenn `hasMinedSpawner == true` und kein Spawner mehr gefunden wird, startet
-`safetyLogoutTimer` (8–24 Ticks). Bei 0: Attack los, `cancelBlockBreaking()`,
+Wenn `hasMinedSpawner == true` und kein erreichbarer Spawner mehr gefunden wird,
+startet nach der 60-Tick-Karenz seit der ersten Zielwahl bzw. dem letzten Blockbruch `safetyLogoutTimer`
+(8–24 Ticks). Das Verschwinden des auslösenden Spielers startet diesen Timer
+für sich allein **nicht**. Bei 0: Attack los, `cancelBlockBreaking()`,
 Guard aus, **`setSafetyLogout(true)`**, dann
 `networkHandler.getConnection().disconnect(...)` mit der Nachricht
 `§aAlle Spawner im Umkreis gesichert! §4Notfall-Logout.`
@@ -1419,6 +1432,16 @@ Wer einen eigenen Testserver hat, kann Kick-Texte auch gezielt durchspielen:
 5. **Danach darf nichts mehr passieren** — kein Countdown, kein Rejoin.
    `krypton_safelogout.txt` = `true`, LOGOUT LOGS enthält den Eintrag mit Name,
    Distanz und Koordinaten.
+
+**Gegenprobe gegen schnelles Ausloggen:** Zwei oder mehr erreichbare Spawner
+bereitstellen, den zweiten Account den Guard auslösen lassen und ihn sofort
+ausloggen (auch vor dem ersten Blockbruch testen). Der Guard muss alle noch
+erreichbaren Spawner weiter abbauen. Während noch einer da ist, darf weder
+„Alle Spawner gesichert“ erscheinen noch der Client disconnecten. Erst nach
+dem letzten Spawner und der Karenz darf der Notfall-Logout erfolgen. Beim
+erneuten Versuch Staff während des Abbaus erscheinen lassen: Der Staff-Stopp
+muss den Einsatz weiterhin sofort beenden. Auch Guard aus und Welt verlassen
+dürfen keinen alten Einsatz beim nächsten Einschalten wieder aufnehmen.
 
 ### 13.5 Staff-Erkennung (Stern-Ranks)
 1. ClickGUI → MISC → **STAFF SCAN** öffnen, während Staff und normale Spieler

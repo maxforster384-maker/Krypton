@@ -246,6 +246,8 @@ public class Krypton implements ModInitializer {
 
     // --- AUTO SPAWNER ---
     private static boolean isMining = false;
+    // Ein gefundenes Abbauziel startet den Notfalleinsatz. Der Einsatz bleibt
+    // aktiv, auch wenn der ausloesende Spieler vor dem ersten Blockbruch geht.
     public static boolean hasMinedSpawner = false;
     private static int safetyLogoutTimer = -1;
     private static BlockPos lastTargetSpawner = null;
@@ -290,7 +292,7 @@ public class Krypton implements ModInitializer {
     // zur Folge, dass der Spawner nie fertig wird.
     private static int guardReleaseTicks = 0;
     private static boolean guardWasBreaking = false;
-    // Ticks seit dem letzten erfolgreichen Blockbruch.
+    // Ticks seit der ersten Zielwahl oder dem letzten erfolgreichen Blockbruch.
     // Schuetzt den Safety-Logout: bei gestackten Spawnern ist die Position fuer
     // ein paar Ticks leer, bis der Server das naechste Exemplar schickt. Ohne
     // Karenzzeit wuerde der Guard genau in dieser Luecke "keine Spawner mehr"
@@ -1067,12 +1069,12 @@ public class Krypton implements ModInitializer {
      * Notfall hat Vorrang vor der Freecam. In der Freecam kann der Guard nicht
      * arbeiten (Körper eingefroren, keine Drehung auf den Spawner möglich) –
      * bisher war er dort schlicht AUS, die Base also ungeschützt, solange man
-     * sich umsah. Jetzt: sobald ein Fremder in Reichweite ist, wird die Freecam
-     * beendet und der Guard-Block läuft im selben Tick.
+     * sich umsah. Sobald ein Fremder in Reichweite ist oder ein begonnener
+     * Einsatz noch laeuft, wird die Freecam beendet und der Guard uebernimmt.
      */
     private static void guardExitFreecamOnEnemy(MinecraftClient client) {
         if (!isAutoSpawnerActive || !isFreecamActive) return;
-        if (!guardEnemyInRange(client)) return;
+        if (!guardEnemyInRange(client) && !hasMinedSpawner) return;
         isFreecamActive = false;
         toggleFreecam(client);
     }
@@ -1629,7 +1631,11 @@ public class Krypton implements ModInitializer {
 
             if (client.world == null) {
                 isFreecamActive = false;
+                if (isMining) setAttackPressed(client, false);
+                isMining = false;
                 hasMinedSpawner = false;
+                safetyLogoutTimer = -1;
+                lastTargetSpawner = null;
                 autoSpawnerState = 0;
                 actionDelayTimer = 0;
                 sessionSeenPlayers.clear();
@@ -1640,6 +1646,9 @@ public class Krypton implements ModInitializer {
                 sneakSuppressTicks = 0;
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
+                guardReleaseTicks = 0;
+                guardWasBreaking = false;
+                guardSinceBreakTicks = 9999;
                 guardFailedTargets.clear();
                 guardNoReachableSpawner = false;
                 return;
@@ -1888,6 +1897,9 @@ public class Krypton implements ModInitializer {
                     guardEngaged = false;
                     guardAimFailTicks = 0;
                     guardSneakWaitTicks = 0;
+                    guardReleaseTicks = 0;
+                    guardWasBreaking = false;
+                    guardSinceBreakTicks = 9999;
                     guardFailedTargets.clear();
                 } else if (enemyNear != null) {
                     // Normaler Spieler → abbauen + ausloggen.
@@ -1905,13 +1917,15 @@ public class Krypton implements ModInitializer {
                     saveLogs();
                 }
 
-                // Nur ein Spawner, der von hier aus WIRKLICH abbaubar ist (sichtbar
-                // UND in Reichweite) – siehe findReachableSpawner().
-                BlockPos spawnerPos = enemyFound ? findReachableSpawner(client) : null;
+                // Sobald ein Ziel gefunden wurde, bleibt der Notfalleinsatz aktiv:
+                // ein Spieler kann den Abbau nicht durch schnelles Ausloggen
+                // abbrechen. Weiterhin nur erreichbare Spawner suchen; Staff
+                // hat oben weiterhin Vorrang und schaltet den Guard komplett ab.
+                boolean guardContinuing = enemyFound || hasMinedSpawner;
+                BlockPos spawnerPos = guardContinuing ? findReachableSpawner(client) : null;
 
-                // Notfall-Modus: ab hier hat der Abbau Vorrang vor allem anderen
-                // (Server-GUIs werden geschlossen).
-                guardEngaged = enemyFound || hasMinedSpawner;
+                // Im Notfall hat der Abbau Vorrang vor Server-GUIs.
+                guardEngaged = guardContinuing;
                 // Gegner da, aber nichts Abbaubares in Sicht und noch nichts
                 // abgebaut → der Guard ist wirkungslos. Sichtbar machen (HUD).
                 guardNoReachableSpawner = enemyFound && spawnerPos == null && !hasMinedSpawner;
@@ -1935,8 +1949,11 @@ public class Krypton implements ModInitializer {
                     }
                 }
 
-                if (enemyFound && spawnerPos != null) {
+                if (guardContinuing && spawnerPos != null) {
                     safetyLogoutTimer = -1;
+                    // Eine kurze Server-Update-Luecke vor dem ersten Bruch darf
+                    // keinen voreiligen Logout ausloesen.
+                    if (!hasMinedSpawner) guardSinceBreakTicks = 0;
                     hasMinedSpawner = true;
 
                     if (lastTargetSpawner == null || !lastTargetSpawner.equals(spawnerPos)) {
@@ -2217,6 +2234,9 @@ public class Krypton implements ModInitializer {
                         guardEngaged = false;
                         guardAimFailTicks = 0;
                         guardSneakWaitTicks = 0;
+                        guardReleaseTicks = 0;
+                        guardWasBreaking = false;
+                        guardSinceBreakTicks = 9999;
                         guardFailedTargets.clear();
 
                         if (client.getNetworkHandler() != null) {
@@ -2240,6 +2260,7 @@ public class Krypton implements ModInitializer {
             } else {
                 // Guard aus oder Freecam an: kompletter Reset. sneakKey bleibt
                 // unberührt – applyForceSneak() gibt die Taste sauber frei.
+                hasMinedSpawner = false;
                 safetyLogoutTimer = -1;
                 autoSpawnerState = 0;
                 actionDelayTimer = 0;
@@ -2247,6 +2268,9 @@ public class Krypton implements ModInitializer {
                 guardEngaged = false;
                 guardAimFailTicks = 0;
                 guardSneakWaitTicks = 0;
+                guardReleaseTicks = 0;
+                guardWasBreaking = false;
+                guardSinceBreakTicks = 9999;
                 guardFailedTargets.clear();
                 guardNoReachableSpawner = false;
                 if (isMining) {
