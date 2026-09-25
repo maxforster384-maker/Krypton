@@ -303,29 +303,33 @@ Guard bleibt aus, bis er von Hand wieder eingeschaltet wird; solange steht
 - **Staff erkannt** (`getPlayerRank()` liefert nicht-leer) → Guard schaltet sich
   **selbst ab**, Attack los, `cancelBlockBreaking()`, alle States zurück.
   Es wird nichts abgebaut und sich nicht ausgeloggt ("still halten").
-- **Normaler Spieler** → `enemyFound = true`, Logout-Log wird geschrieben
+- **Normaler Spieler** → `guardThreatLatched = true`, Logout-Log wird geschrieben
   (`lastLogoutLog` mit Uhrzeit, Name, Distanz, XYZ) und gespeichert.
 
-**`guardEngaged`** (`enemyFound || hasMinedSpawner`) markiert den Notfall-Modus.
+**`guardEngaged`** (`guardThreatLatched`) markiert den Notfall-Modus.
 Solange er läuft, hat der Abbau absoluten Vorrang:
 vom Server geöffnete GUIs werden geschlossen.
 
-**Auslöser verlässt den Server:** `hasMinedSpawner` wird bereits beim ersten
-erreichbaren Ziel gesetzt und hält den Einsatz ab dann fest – auch wenn noch
-kein Block vollständig zerbrochen ist. Zielsuche und State-Machine laufen mit
-`enemyFound || hasMinedSpawner` weiter. Ein schnelles Ausloggen des fremden
-Spielers darf den Abbau also nicht in den Safety-Logout umleiten. Erst wenn
-kein weiterer erreichbarer Spawner gefunden wird **und** die Karenz nach dem
-ersten Ziel bzw. letzten Bruch abgelaufen ist, folgt der bisherige Notfall-Logout. Erscheint
-Staff, gewinnt weiterhin der Staff-Stopp; manuelles Abschalten und Weltverlust
-setzen den festgehaltenen Einsatz zurück.
+**Auslöser verlässt den Server:** Bereits die erste Sichtung setzt
+`guardThreatLatched`, unabhängig davon, ob schon ein Ziel gefunden oder ein
+Block zerbrochen wurde. Zielsuche und State-Machine laufen danach weiter,
+selbst wenn der Gegner sofort ausloggt. `hasMinedSpawner` bedeutet separat:
+mindestens ein Blockbruch wurde clientseitig abgeschlossen (nicht bloß ein Ziel
+ausgewählt). Ohne einen solchen Abschluss wird
+**nicht** fälschlich „alle gesichert“ gemeldet; der Guard bleibt im Einsatz
+und zeigt „KEIN SPAWNER IN REICHWEITE“. Nach einem abgeschlossenen Abbau wird erst ausgeloggt,
+wenn kein erreichbarer oder sichtbarer Spawner im 9×9×9-Suchbereich mehr da ist,
+kein fehlgeschlagenes Ziel aussteht und die Karenz abgelaufen ist. Fehlgeschlagene
+Ziele werden alle 60 Ticks erneut geprüft. Staff gewinnt weiterhin immer;
+manuelles Abschalten und Weltverlust setzen den festgehaltenen Einsatz zurück.
 
 **Spawner-Suche:** `findReachableSpawner()` — 9×9×9 Würfel um den Spieler,
 `Blocks.SPAWNER`. Pro Kandidat **derselbe Check wie beim Abbau**: Raycast vom
 Auge Richtung Blockmitte, Länge = `getBlockInteractionRange()`, der **erste**
 getroffene Block muss der Spawner sein. Davon der nächstgelegene. Ziele aus
 `guardFailedTargets` (3 s nicht getroffen) werden übersprungen, damit der
-Guard garantiert alle Spawner durchgeht und danach beim Safety-Logout landet.
+Guard andere Ziele zuerst bearbeiten kann. Fehlgeschlagene Ziele werden nach
+60 Ticks erneut versucht und blockieren bis dahin den Safety-Logout.
 Gibt es keinen erreichbaren Spawner, zeigt das HUD
 `Guard: §cKEIN SPAWNER IN REICHWEITE` (§6.1) — der Spieler muss dann **innerhalb**
 **von 4,5 Blöcken mit freier Sicht** stehen, sonst kann der Guard nichts tun.
@@ -446,6 +450,8 @@ Danach geht es **nicht** direkt weiter: die State-Machine springt zurück auf
 **State 3**, der wartet, bis der Sneak serverseitig wieder anliegt, und erst
 State 4 drückt die Abbau-Taste neu. Das ist exakt der Ablauf von Hand — alles
 loslassen, wieder ducken, wieder zugreifen.
+Die Pause bleibt auch dann erhalten, wenn der nächste Spawner an einer anderen
+Position liegt; der Zielwechsel darf State 5 nicht vorzeitig verlassen.
 
 > **Nur ZWISCHEN Blöcken loslassen.** `cancelBlockBreaking()` setzt
 > `currentBreakingProgress` auf 0 zurück. Eine Pause *mitten* im Abbau hätte zur
@@ -458,13 +464,16 @@ Stacks schickt. `findReachableSpawner()` findet in dieser Lücke nichts — ohne
 Gegenmaßnahme würde der Guard "keine Spawner mehr" schließen und **mitten im**
 **Stack ausloggen**, obwohl noch Dutzende dastehen. Deshalb startet der
 Safety-Logout-Timer erst, wenn der letzte Blockbruch **mehr als 60 Ticks (3 s)**
-her ist.
+her ist. Ist ein Spawner noch sichtbar, aber nicht erreichbar, oder wurde ein
+Ziel wegen Raycast-Fehlern übersprungen, bleibt der Guard online und versucht es
+erneut, statt „alle gesichert“ zu behaupten.
 
 
 **Kein Hängenbleiben:** Trifft der Raycast das Ziel nicht (verdeckt / zu weit weg),
 zählt `guardAimFailTicks`. Nach 5 Ticks geht es zurück in State 2 (neu
-anvisieren), nach 60 Ticks wird das Ziel freigegeben (`autoSpawnerState = 0`),
-damit stattdessen der Safety-Logout greifen kann.
+anvisieren), nach 60 Ticks wird das Ziel vorübergehend übersprungen
+(`autoSpawnerState = 0`) und später erneut versucht. Ein noch sichtbarer,
+unerreichbarer Spawner blockiert den Safety-Logout.
 
 **Der Watchdog** `ensureGuardReady()` läuft jeden Tick, solange
 `guardLockActive()`:
@@ -554,8 +563,9 @@ Die Sperre ist rein clientseitig, der Server merkt davon nichts. Im HUD steht
 
 #### 5.4.4 Safety-Logout
 
-Wenn `hasMinedSpawner == true` und kein erreichbarer Spawner mehr gefunden wird,
-startet nach der 60-Tick-Karenz seit der ersten Zielwahl bzw. dem letzten Blockbruch `safetyLogoutTimer`
+Wenn `hasMinedSpawner == true` und weder ein erreichbarer noch ein sichtbarer
+Spawner im Suchbereich oder ein fehlgeschlagenes Ziel verbleibt,
+startet nach der 60-Tick-Karenz seit dem letzten clientseitigen Blockbruch `safetyLogoutTimer`
 (8–24 Ticks). Das Verschwinden des auslösenden Spielers startet diesen Timer
 für sich allein **nicht**. Bei 0: Attack los, `cancelBlockBreaking()`,
 Guard aus, **`setSafetyLogout(true)`**, dann
@@ -1435,13 +1445,16 @@ Wer einen eigenen Testserver hat, kann Kick-Texte auch gezielt durchspielen:
 
 **Gegenprobe gegen schnelles Ausloggen:** Zwei oder mehr erreichbare Spawner
 bereitstellen, den zweiten Account den Guard auslösen lassen und ihn sofort
-ausloggen (auch vor dem ersten Blockbruch testen). Der Guard muss alle noch
-erreichbaren Spawner weiter abbauen. Während noch einer da ist, darf weder
+ausloggen (auch vor der ersten Zielwahl und vor dem ersten Blockbruch testen).
+Der Guard muss alle noch erreichbaren Spawner weiter abbauen. Während noch einer da ist, darf weder
 „Alle Spawner gesichert“ erscheinen noch der Client disconnecten. Erst nach
 dem letzten Spawner und der Karenz darf der Notfall-Logout erfolgen. Beim
 erneuten Versuch Staff während des Abbaus erscheinen lassen: Der Staff-Stopp
 muss den Einsatz weiterhin sofort beenden. Auch Guard aus und Welt verlassen
 dürfen keinen alten Einsatz beim nächsten Einschalten wieder aufnehmen.
+Wenn ein sichtbarer Spawner unerreichbar ist, muss der Guard online bleiben und
+„KEIN SPAWNER IN REICHWEITE“ anzeigen; nach Wiederherstellung der Sichtlinie
+muss er erneut abbauen.
 
 ### 13.5 Staff-Erkennung (Stern-Ranks)
 1. ClickGUI → MISC → **STAFF SCAN** öffnen, während Staff und normale Spieler
