@@ -1348,7 +1348,7 @@ Upload von `build/libs/` als Artefakt `Artifacts`.
      Fehler zuerst beheben oder klar als Blocker melden.
   3. Ausschließlich `build/libs/krypton-1.0.0.jar` (niemals die
      `-sources.jar`) nach
-     `C:\Users\maxfo\AppData\Roaming\norisk\NoRiskClientV3\data\profiles\Fabric 1.21.11\custom\_mods\krypton-1.0.0.jar`
+     `C:\Users\maxfo\AppData\Roaming\norisk\NoRiskClientV3\data\profiles\Fabric 1.21.11\custom_mods\krypton-1.0.0.jar`
      kopieren und dabei eine vorhandene ältere Krypton-JAR ersetzen. Fehlende
      Zielordner dürfen angelegt werden. Anschließend Quelle und Ziel per Größe
      oder SHA-256 vergleichen.
