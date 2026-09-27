@@ -1,0 +1,19 @@
+name: AFK Diagnose
+on: [pull_request, push]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gradle/actions/wrapper-validation@v6
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      - name: Build und Diagnose-Tests
+        run: bash ./gradlew -p afk-diagnose build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: AFK-Diagnose
+          path: afk-diagnose/build/libs/afk-diagnose-1.0.0.jar
