@@ -16,6 +16,7 @@ public final class DiagnoseSelfTest {
     public static void main(String[] args) throws Exception {
         clockTests();
         classifierTests();
+        presentationTests();
         logTests();
         readOnlyContract();
         System.out.println("AFK-Diagnose: " + checks + " Pruefungen erfolgreich.");
@@ -59,6 +60,58 @@ public final class DiagnoseSelfTest {
         check(ServerMessageClassifier.classify("Please /tpaccept") == null, "Keine Teleport-Automatik");
         check(ServerMessageClassifier.classify("You earned 100 dollars") == null, "Keine erfundene Produktionsmessung");
         check(ServerMessageClassifier.classify("private chat text") == null, "Kein allgemeines Chat-Archiv");
+    }
+
+    private static void presentationTests() {
+        for (int width : new int[] {240, 320, 480, 854, 1280}) {
+            for (int height : new int[] {180, 240, 360, 480, 720}) {
+                LogPresentation.Layout layout = LogPresentation.layout(width, height);
+                check(layout.left() >= 0 && layout.left() + layout.width() <= width, "Panel bleibt im Fenster");
+                check(layout.buttonWidth() >= 60, "Vollstaendige Navigationsbeschriftung hat Platz");
+                check(layout.left() + 3 * layout.buttonWidth() + 16 <= width, "Zurueck-Button nicht abgeschnitten");
+                check(layout.buttonY() >= 0 && layout.buttonY() + 20 <= height, "Buttons vertikal im Fenster");
+                check(layout.perPage() >= 1 && layout.cardHeight() >= 32, "Mindestens ein lesbarer Eintrag");
+                int lastBottom = layout.top() + layout.perPage() * layout.cardHeight()
+                        + (layout.perPage() - 1) * LogPresentation.CARD_GAP;
+                check(lastBottom <= layout.bottom(), "Karten ueberdecken Navigation nicht");
+                check(layout.bottom() + 8 <= layout.buttonY() - 27, "Abstand zur Seitenanzeige");
+            }
+        }
+        check(LogPresentation.pages(0, 3) == 1, "Leeres Protokoll hat genau eine Seite");
+        check(LogPresentation.pages(3, 3) == 1, "Volle erste Seite erzeugt keine leere zweite");
+        check(LogPresentation.pages(4, 3) == 2, "Weiterer Eintrag erzeugt zweite Seite");
+        check(LogPresentation.clampPage(-1, 4, 3) == 0, "Neuere endet bei aktuellster Seite");
+        check(LogPresentation.clampPage(100, 4, 3) == 1, "Aeltere endet bei letzter Seite");
+        check(LogPresentation.clampPage(5, 0, 3) == 0, "Leeren oder kleiner gewordenen Verlauf behandeln");
+        String raw = "2026-09-27T09:10:23.123456+02:00 | MESSUNG | WeltNr=2; Dimension=minecraft:overworld; "
+                + "KoerperXYZ=1.00,64.00,2.00; FensterFokus=false; Guard=WARTET; Freecam=true; RejoinLock=false; "
+                + "Spawner-BLOCKPOSITIONEN=3; Naechster=2.30 Bloecke bei 1,64,3; Chunks=9/9; Pruefung=vollstaendig im Client";
+        LogPresentation.Entry entry = LogPresentation.present(raw);
+        check(entry.heading().equals("27.09. 09:10:23  •  Spawner-Prüfung"), "Lesbare Uhrzeit und Ereignisname");
+        check(entry.summary().size() == 4, "Messwerte in vier strukturierte Zeilen aufgeteilt");
+        check(entry.summary().getFirst().contains("Spawner: 3 Positionen"), "Keine erfundene Stackmenge");
+        check(entry.summary().get(1).contains("Chunks: 9/9") && entry.summary().get(1).contains("Fensterfokus: nein"), "Chunks und Fokus lesbar");
+        check(entry.summary().get(2).contains("1.00,64.00,2.00"), "Spielerposition unveraendert");
+        check(entry.summary().get(3).contains("Freecam: ja") && entry.summary().get(3).contains("Rejoin-Sperre: nein"), "Schutzflags uebersetzt");
+        check(entry.fullText().equals(raw), "Vollstaendige Rohdaten bleiben erhalten");
+        check(LogPresentation.present(raw.replace("vollstaendig im Client", "TEILMESSUNG (Chunks fehlen)")).color() == 0xF3C36B,
+                "Teilpruefung sichtbar als Warnung, nicht als Entwarnung");
+        check(LogPresentation.present("2026-09-27T09:10:23+02:00 | MESSLUECKE | Pause").color() == 0xFF8B8B, "Messluecke rot");
+        check(LogPresentation.present("alt | UNBEKANNT | Text | bleibt erhalten").fullText().endsWith("Text | bleibt erhalten"), "Unbekannte Eintraege mit Trennzeichen bleiben erhalten");
+        check(LogPresentation.present("alter unformatierter Eintrag").summary().getFirst().equals("alter unformatierter Eintrag"), "Alte Zeilen weiter sichtbar");
+        LogPresentation.Entry offline = LogPresentation.present("2026-09-27T09:10:23+02:00 | MESSUNG | WeltNr=3; "
+                + "Spielwelt/Spieler fehlt; Krypton=nicht installiert; Spawner=NICHT PRUEFBAR (keine verbundene Spielwelt)");
+        check(offline.summary().getFirst().contains("NICHT PRUEFBAR"), "Offline-Warnung zuerst statt falscher Nullmessung");
+        check(offline.color() == 0xF3C36B, "Offline-Pruefung bleibt Warnung");
+        check(offline.summary().get(2).equals("Krypton: nicht installiert"), "Optional fehlendes Krypton ehrlich darstellen");
+        check(LogPresentation.present("2026-09-27T09:10:23+02:00 | SCHUTZSTATUS | Krypton-Status=UNBEKANNT; Messung verschoben")
+                .summary().getFirst().contains("UNBEKANNT"), "Unbekannte Bruecke nicht als Guard aus darstellen");
+        String screen;
+        try { screen = Files.readString(Path.of("src/main/java/com/krypton/afkdiagnose/AfkLogScreen.java")); }
+        catch (java.io.IOException problem) { throw new AssertionError(problem); }
+        check(screen.contains("Text.literal(\"Zurück\")"), "Vollstaendiger Zurueck-Button");
+        check(!screen.contains("Text.literal(\"Neueste\")"), "Kein redundanter dritter Navigationsbutton");
+        check(screen.contains("boolean shouldPause() { return false; }"), "Neues Design pausiert Spiel nicht");
     }
 
     private static void logTests() throws Exception {

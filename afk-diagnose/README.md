@@ -14,7 +14,15 @@ Krypton ist **optional**, keine harte Abhaengigkeit.
 - Die Messung startet automatisch; kein Modul muss eingeschaltet werden.
 - **F8** oeffnet das eigene **AFK LOG**-Fenster. Die Taste ist unter Minecraft →
   Steuerung → Tastenbelegung → MISC aenderbar. Kein neuer Knopf im Krypton-Menue.
-- Aeltere/Neuere blaettert, Neueste springt zur aktuellen Seite. Der Bildschirm pausiert
+- **< Neuere / Ältere >** blaettern; die Seitenanzeige nennt die aktuelle Seite.
+  Seite 1 zeigt die neuesten Eintraege, dort ist Neuere bewusst deaktiviert.
+  Das Mausrad blaettert ebenfalls. **Zurück** bzw. Escape schliesst das Fenster.
+- Farbige Karten zeigen lesbare Uhrzeit/Ereignisnamen und kurze Messwerte statt
+  langer Rohtext-Zeilen. Gelb markiert u.a. Teilmessungen/Limbo, Rot Messluecken.
+  Maus ueber einer Karte zeigt Details inklusive vollstaendigem Datum; bei zu
+  kleinem Fenster verweist die gekuerzte Detailansicht auf die Protokolldatei.
+  Navigation und Textbreiten passen sich der GUI-Groesse an.
+- Der Bildschirm pausiert
   das Spiel nicht. Bei laufendem Abbau/Guard-Einsatz wird er nicht geoeffnet bzw.
   ein bereits geoeffnetes Diagnose-Fenster geschlossen. Fremde Screens bleiben unangetastet.
 
@@ -98,6 +106,8 @@ Umbau von Kryptons Root-Build. Eigener GitHub-Actions-Workflow baut diese Mod se
 Weltwechsel, Tick-Luecken, nanoTime-Ueberlauf, Systemmeldungen, asynchrones Speichern,
 Neustart-Historie, Rotation, Schreibfehler, begrenzte Warteschlange und
 Read-only-Quellcode-Vertrag. Die Tests starten Minecraft nicht.
+Ausserdem: Karten-/Button-Grenzen bei 25 GUI-Groessen, Seitengrenzen,
+lesbare Messwert-Darstellung, Warnfarben und Erhalt der Rohdaten.
 
 Ein echter Fabric-/NoRisk-Lauf und ein Nacht-Test sind separat zu bestaetigen;
 erfolgreicher Build und Tests ersetzen keinen Ingame-Kompatibilitaetstest.
