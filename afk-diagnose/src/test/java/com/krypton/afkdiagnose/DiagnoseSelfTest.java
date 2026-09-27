@@ -74,7 +74,8 @@ public final class DiagnoseSelfTest {
                 int lastBottom = layout.top() + layout.perPage() * layout.cardHeight()
                         + (layout.perPage() - 1) * LogPresentation.CARD_GAP;
                 check(lastBottom <= layout.bottom(), "Karten ueberdecken Navigation nicht");
-                check(layout.bottom() + 8 <= layout.buttonY() - 27, "Abstand zur Seitenanzeige");
+                check(layout.bottom() + 4 <= layout.buttonY() - 15, "Abstand zur Seitenanzeige");
+                check((layout.cardHeight() - 26) / 10 >= 4, "Vier Messzeilen auch im kleinen Fenster sichtbar");
             }
         }
         check(LogPresentation.pages(0, 3) == 1, "Leeres Protokoll hat genau eine Seite");
@@ -87,22 +88,23 @@ public final class DiagnoseSelfTest {
                 + "KoerperXYZ=1.00,64.00,2.00; FensterFokus=false; Guard=WARTET; Freecam=true; RejoinLock=false; "
                 + "Spawner-BLOCKPOSITIONEN=3; Naechster=2.30 Bloecke bei 1,64,3; Chunks=9/9; Pruefung=vollstaendig im Client";
         LogPresentation.Entry entry = LogPresentation.present(raw);
-        check(entry.heading().equals("27.09. 09:10:23  •  Spawner-Prüfung"), "Lesbare Uhrzeit und Ereignisname");
+        check(entry.heading().equals("27.09.2026 09:10:23  •  Spawner-Prüfung"), "Vollstaendiges Datum, Uhrzeit und Ereignisname");
         check(entry.summary().size() == 4, "Messwerte in vier strukturierte Zeilen aufgeteilt");
         check(entry.summary().getFirst().contains("Spawner: 3 Positionen"), "Keine erfundene Stackmenge");
-        check(entry.summary().get(1).contains("Chunks: 9/9") && entry.summary().get(1).contains("Fensterfokus: nein"), "Chunks und Fokus lesbar");
+        check(entry.summary().getFirst().contains("Abstand: 2.30 Bloecke") && !entry.summary().getFirst().contains(" bei "), "Abstand direkt sichtbar, Zielkoordinaten bleiben in Details");
+        check(entry.summary().get(1).contains("Chunks: 9/9") && entry.summary().get(1).contains("Fokus: nein"), "Chunks und Fokus lesbar");
         check(entry.summary().get(2).contains("1.00,64.00,2.00"), "Spielerposition unveraendert");
         check(entry.summary().get(3).contains("Freecam: ja") && entry.summary().get(3).contains("Rejoin-Sperre: nein"), "Schutzflags uebersetzt");
         check(entry.fullText().equals(raw), "Vollstaendige Rohdaten bleiben erhalten");
-        check(LogPresentation.present(raw.replace("vollstaendig im Client", "TEILMESSUNG (Chunks fehlen)")).color() == 0xF3C36B,
+        check(LogPresentation.present(raw.replace("vollstaendig im Client", "TEILMESSUNG (Chunks fehlen)")).color() == 0xFFF3C36B,
                 "Teilpruefung sichtbar als Warnung, nicht als Entwarnung");
-        check(LogPresentation.present("2026-09-27T09:10:23+02:00 | MESSLUECKE | Pause").color() == 0xFF8B8B, "Messluecke rot");
+        check(LogPresentation.present("2026-09-27T09:10:23+02:00 | MESSLUECKE | Pause").color() == 0xFFFF8B8B, "Messluecke rot");
         check(LogPresentation.present("alt | UNBEKANNT | Text | bleibt erhalten").fullText().endsWith("Text | bleibt erhalten"), "Unbekannte Eintraege mit Trennzeichen bleiben erhalten");
         check(LogPresentation.present("alter unformatierter Eintrag").summary().getFirst().equals("alter unformatierter Eintrag"), "Alte Zeilen weiter sichtbar");
         LogPresentation.Entry offline = LogPresentation.present("2026-09-27T09:10:23+02:00 | MESSUNG | WeltNr=3; "
                 + "Spielwelt/Spieler fehlt; Krypton=nicht installiert; Spawner=NICHT PRUEFBAR (keine verbundene Spielwelt)");
         check(offline.summary().getFirst().contains("NICHT PRUEFBAR"), "Offline-Warnung zuerst statt falscher Nullmessung");
-        check(offline.color() == 0xF3C36B, "Offline-Pruefung bleibt Warnung");
+        check(offline.color() == 0xFFF3C36B, "Offline-Pruefung bleibt Warnung");
         check(offline.summary().get(2).equals("Krypton: nicht installiert"), "Optional fehlendes Krypton ehrlich darstellen");
         check(LogPresentation.present("2026-09-27T09:10:23+02:00 | SCHUTZSTATUS | Krypton-Status=UNBEKANNT; Messung verschoben")
                 .summary().getFirst().contains("UNBEKANNT"), "Unbekannte Bruecke nicht als Guard aus darstellen");
@@ -112,6 +114,26 @@ public final class DiagnoseSelfTest {
         check(screen.contains("Text.literal(\"Zurück\")"), "Vollstaendiger Zurueck-Button");
         check(!screen.contains("Text.literal(\"Neueste\")"), "Kein redundanter dritter Navigationsbutton");
         check(screen.contains("boolean shouldPause() { return false; }"), "Neues Design pausiert Spiel nicht");
+        check(LogPresentation.opaque(0xECF4FC) == 0xFFECF4FC, "RGB wird sichtbar statt Alpha null");
+        check(LogPresentation.opaque(0) == 0xFF000000, "Auch Schwarz ist nicht versehentlich transparent");
+        check(LogPresentation.opaque(0x80CFDAE6) == 0xFFCFDAE6, "Textdarstellung erzwingt volle Deckkraft");
+        check(LogPresentation.opaque(0xFFCFDAE6) == 0xFFCFDAE6, "ARGB-Farbe bleibt unveraendert");
+        var literals = java.util.regex.Pattern.compile("0x([0-9A-Fa-f]{6,8})\\b").matcher(screen);
+        while (literals.find()) {
+            long color = Long.parseLong(literals.group(1), 16);
+            check((color >>> 24) > 0, "GUI-Farbliteral hat Deckkraft: " + literals.group());
+        }
+        check(screen.contains("drawTextWithShadow(textRenderer, text, x, y, LogPresentation.opaque(color))"), "Linker Text nutzt Deckkraft-Sicherung");
+        check(screen.contains("drawCenteredTextWithShadow(textRenderer, text, width / 2, y, LogPresentation.opaque(color))"), "Zentrierter Text nutzt Deckkraft-Sicherung");
+        for (String event : List.of("MESSUNG", "MESSUNG_NACHGEHOLT", "MESSUNG_VERSCHOBEN", "WELTWECHSEL",
+                "VERBINDUNG", "SCHUTZSTATUS", "LIMBO_MELDUNG", "SERVER_UPDATE_MELDUNG", "SHARD_BELOHNUNG",
+                "MESSLUECKE", "MOD_START", "MOD_STOP", "DIAGNOSE_DEAKTIVIERT", "UNBEKANNT")) {
+            check((LogPresentation.present("2026-09-27T09:10:23+02:00 | " + event + " | Test").color() >>> 24) == 255,
+                    "Ereignistext hat volle Deckkraft: " + event);
+        }
+        check((LogPresentation.present("alte Zeile").color() >>> 24) == 255, "Alte Eintraege ebenfalls sichtbar");
+        check((new LogPresentation.Entry("Test", 0x78C7E8, List.of(), "Test").color() >>> 24) == 255,
+                "Entry sichert auch kuenftige RGB-Farben ab");
     }
 
     private static void logTests() throws Exception {

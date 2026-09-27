@@ -60,20 +60,20 @@ final class AfkLogScreen extends Screen {
         int x = layout.left(), right = x + layout.width();
         context.fill(x, 8, right, height - 8, 0xF0101927);
         context.fill(x, 8, right, 10, 0xFF58B8DF);
-        context.drawTextWithShadow(textRenderer, title, x + 10, 18, 0xECF4FC);
-        drawFitted(context, "Nur Beobachtung • alle 10 Minuten • Radius 16", x + 10, 32, layout.width() - 20, 0x9BACBF);
+        context.drawTextWithShadow(textRenderer, title, x + 10, 14, 0xFFECF4FC);
+        drawFitted(context, "Alle 10 Min • Radius 16 • keine Loot-Messung", x + 10, 28, layout.width() - 20, 0xFF9BACBF);
         List<String> rows = log.history();
         updateNavigation(rows.size());
         String status = log.diskFailed() ? "Speicherfehler: nur RAM!" : "Protokoll aktiv";
         status += " • " + rows.size() + " Einträge";
         if (log.dropped() > 0) status += " • " + log.dropped() + " verworfen";
-        drawFitted(context, status, x + 10, 47, layout.width() - 20,
-                log.diskFailed() || log.dropped() > 0 ? 0xF3C36B : 0x85D6A3);
+        drawFitted(context, status, x + 10, 42, layout.width() - 20,
+                log.diskFailed() || log.dropped() > 0 ? 0xFFF3C36B : 0xFF85D6A3);
         int from = page * layout.perPage(), to = Math.min(rows.size(), from + layout.perPage());
         String hovered = null;
         if (rows.isEmpty() && layout.cardHeight() > 0) {
             drawFitted(context, "Noch keine Einträge. Das Protokoll wird geladen.", x + 10,
-                    layout.top() + 10, layout.width() - 20, 0x9BACBF);
+                    layout.top() + 10, layout.width() - 20, 0xFF9BACBF);
         }
         for (int i = from; i < to && layout.cardHeight() > 0; i++) {
             int y = layout.top() + (i - from) * (layout.cardHeight() + LogPresentation.CARD_GAP);
@@ -85,13 +85,12 @@ final class AfkLogScreen extends Screen {
             int visibleLines = Math.max(0, (layout.cardHeight() - 26) / 10);
             for (int line = 0; line < Math.min(visibleLines, entry.summary().size()); line++) {
                 drawFitted(context, entry.summary().get(line), x + 10, y + 23 + line * 10,
-                        layout.width() - 20, 0xCFDAE6);
+                        layout.width() - 20, 0xFFCFDAE6);
             }
             if (hover) hovered = entry.fullText();
         }
         drawCenteredFitted(context, "Seite " + (page + 1) + " / "
-                + LogPresentation.pages(rows.size(), layout.perPage()) + " • Neueste zuerst", layout.buttonY() - 27, 0xD8E5F1);
-        drawCenteredFitted(context, "Details per Maus • keine Loot-Messung", layout.buttonY() - 13, 0x9BACBF);
+                + LogPresentation.pages(rows.size(), layout.perPage()) + " • Neueste zuerst", layout.buttonY() - 15, 0xFFD8E5F1);
         super.render(context, mouseX, mouseY, delta);
         if (hovered != null) drawDetails(context, hovered, mouseX, mouseY);
     }
@@ -101,13 +100,13 @@ final class AfkLogScreen extends Screen {
         if (textRenderer.getWidth(text) > available) {
             text = textRenderer.trimToWidth(text, Math.max(0, available - textRenderer.getWidth("…"))) + "…";
         }
-        context.drawTextWithShadow(textRenderer, text, x, y, color);
+        context.drawTextWithShadow(textRenderer, text, x, y, LogPresentation.opaque(color));
     }
 
     private void drawCenteredFitted(DrawContext context, String text, int y, int color) {
         int available = Math.max(0, layout.width() - 20);
         text = textRenderer.trimToWidth(text, available);
-        context.drawCenteredTextWithShadow(textRenderer, text, width / 2, y, color);
+        context.drawCenteredTextWithShadow(textRenderer, text, width / 2, y, LogPresentation.opaque(color));
     }
 
     private void drawDetails(DrawContext context, String raw, int mouseX, int mouseY) {

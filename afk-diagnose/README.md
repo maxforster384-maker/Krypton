@@ -22,6 +22,12 @@ Krypton ist **optional**, keine harte Abhaengigkeit.
   Maus ueber einer Karte zeigt Details inklusive vollstaendigem Datum; bei zu
   kleinem Fenster verweist die gekuerzte Detailansicht auf die Protokolldatei.
   Navigation und Textbreiten passen sich der GUI-Groesse an.
+- Ueberschrift, Seitenanzeige und Messwerte verwenden deckende ARGB-Textfarben
+  fuer Minecraft 1.21.11. Vier kurze Messzeilen sind auch bei 180 Pixel GUI-Hoehe
+  sichtbar: Spawner/Abstand, Chunks/Fokus, Standort und Schutzstatus. Die Karten
+  zeigen das vollstaendige Datum mit Jahr; fuer Screenshots die Maus neben die
+  Karten bewegen, damit kein Detail-Tooltip die Werte verdeckt.
+  Die vorher unsichtbare Schrift betraf nur die Anzeige, nicht vorhandene Logdaten.
 - Der Bildschirm pausiert
   das Spiel nicht. Bei laufendem Abbau/Guard-Einsatz wird er nicht geoeffnet bzw.
   ein bereits geoeffnetes Diagnose-Fenster geschlossen. Fremde Screens bleiben unangetastet.
@@ -108,6 +114,8 @@ Neustart-Historie, Rotation, Schreibfehler, begrenzte Warteschlange und
 Read-only-Quellcode-Vertrag. Die Tests starten Minecraft nicht.
 Ausserdem: Karten-/Button-Grenzen bei 25 GUI-Groessen, Seitengrenzen,
 lesbare Messwert-Darstellung, Warnfarben und Erhalt der Rohdaten.
+Deckkraft-Regressionstests pruefen die GUI-Farben, alle Ereignisfarben und die
+Sicherung beider Text-Zeichenpfade gegen versehentlich transparente RGB-Farben.
 
 Ein echter Fabric-/NoRisk-Lauf und ein Nacht-Test sind separat zu bestaetigen;
 erfolgreicher Build und Tests ersetzen keinen Ingame-Kompatibilitaetstest.

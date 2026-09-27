@@ -18,6 +18,9 @@ fuer Fabric/Minecraft 1.21.11. Die technische Referenz ist README.md in diesem O
 - GUI: farbige Ereigniskarten, lesbare Zeit/Messwerte, Details per Maus; nur
   Neuere/Aeltere plus vollstaendiges Zurueck. Navigation an Fenster anpassen und
   Layout/Seitengrenzen ohne Minecraft testen. Keine Messlogik fuer Design aendern.
+- Textfarben immer als ARGB mit Alpha FF, auch dynamische Ereignisfarben.
+  DrawContext verwirft in 1.21.11 Text mit Alpha 0. Deckkraft am Zeichenpfad
+  absichern und testen; die vier Messzeilen auch in kleinen Fenstern zeigen.
 - Mit JDK 25 vom Repository aus `.\gradlew.bat -p afk-diagnose build` ausfuehren.
   Tests muessen erfolgreich sein. Keine Installation/Commits/Pushes bei Buildfehlern.
 - Nur `afk-diagnose/build/libs/afk-diagnose-1.0.0.jar` nach
